@@ -1,6 +1,9 @@
 # PythonCLI - Unreal
 
-Run Python from Unreal Engine 5.8 with a portable interpreter and a per-project venv. Scripts run **out of process**: a crash in a native ML library never takes the editor down, and the GIL never touches the game thread. Components talk to their scripts with events in both directions (JSON plus raw binary and tensors) and call Python functions with replies.
+Run Python in Unreal Engine with a portable interpreter and a per-project venv via [CLISystem](https://github.com/getnamo/CLISystem-Unreal/) plugin. 
+
+
+Scripts run **out of process**: e.g. a crash in a native ML library never takes the editor down, and the GIL never touches the game thread. Components talk to their scripts with events in both directions (JSON plus raw binary and tensors) and call Python functions with replies.
 
 It's the base for the [TensorFlow-Unreal](https://github.com/getnamo/TensorFlow-Unreal) 2.0 refactor, and for PyTorch workflows.
 
