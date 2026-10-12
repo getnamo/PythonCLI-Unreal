@@ -1,0 +1,32 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Python CLI",
+	"Description": "Embedded portable Python with a per-project venv (uv). Run Python scripts out of process from components, stream events, binary and tensors both ways, and call Python functions with replies.",
+	"Category": "Scripting",
+	"CreatedBy": "getnamo",
+	"CreatedByURL": "https://github.com/getnamo",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"EngineVersion": "5.8.0",
+	"CanContainContent": true,
+	"IsBetaVersion": true,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "PythonCLI",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [ "Win64", "Linux" ]
+		}
+	],
+	"Plugins": [
+		{
+			"Name": "CLISystem",
+			"Enabled": true
+		}
+	]
+}

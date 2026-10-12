@@ -73,3 +73,10 @@ Plugins/**/Intermediate/*
 
 # Cache files for the editor to use
 DerivedDataCache/*
+
+# PythonCLI: bundled runtime (fetched by Tools/), Python caches
+ThirdParty/python/
+ThirdParty/uv/
+ThirdParty/.downloads/
+__pycache__/
+*.pyc
