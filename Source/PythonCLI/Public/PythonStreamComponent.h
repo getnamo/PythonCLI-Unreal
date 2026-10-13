@@ -59,9 +59,10 @@ public:
 	/** Send the frames to a Python service instead of a component (call before the stream opens, or reopen
 	 it). Function: a function in the service's script that gets each frame (fn(frame); for Lockstep its
 	 return value is the step's result); empty: its @ue.on_stream(StreamName) handlers. Several streams can
-	 target one service with the same StreamName. */
-	UFUNCTION(BlueprintCallable, Category = "Python Stream", meta = (AutoCreateRefTerm = "Function"))
-	void SetTargetService(UPythonService* Service, const FString& Function);
+	 target one service with the same StreamName. InfoJson: a JSON object added to the stream's info
+	 (frame.info in Python), e.g. which model the frames are for. */
+	UFUNCTION(BlueprintCallable, Category = "Python Stream", meta = (AutoCreateRefTerm = "Function,InfoJson"))
+	void SetTargetService(UPythonService* Service, const FString& Function, const FString& InfoJson);
 
 	UFUNCTION(BlueprintPure, Category = "Python Stream")
 	UPythonService* GetTargetService() const { return TargetService; }
@@ -111,4 +112,5 @@ protected:
 	UPROPERTY()
 	TObjectPtr<UPythonService> TargetService;
 	FString TargetFunction;
+	FString TargetInfoJson;
 };

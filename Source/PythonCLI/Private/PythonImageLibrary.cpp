@@ -352,22 +352,60 @@ bool UPythonImageLibrary::UpdateTextureFromTensor(UTexture2D* Texture, const FPy
 bool UPythonImageLibrary::WriteTensorToRenderTarget(const FPyTensor& Tensor, UTextureRenderTarget2D* RenderTarget, bool bChannelsFirst)
 {
 	using namespace PythonImagePrivate;
-	TArray<FLinearColor> Pixels;
-	int32 W = 0, H = 0;
-	FString Error;
-	if (!RenderTarget || !TensorToPixels(Tensor, bChannelsFirst, Pixels, W, H, Error))
+	if (!RenderTarget)
 	{
-		UE_LOG(LogPythonCLI, Warning, TEXT("WriteTensorToRenderTarget: %s"), RenderTarget ? *Error : TEXT("no render target"));
+		UE_LOG(LogPythonCLI, Warning, TEXT("WriteTensorToRenderTarget: no render target"));
 		return false;
 	}
-	if (RenderTarget->SizeX != W || RenderTarget->SizeY != H)
-	{
-		RenderTarget->ResizeTarget(W, H);
-	}
-	const EPixelFormat Format = RenderTarget->GetFormat();
 	TArray<uint8> Data;
 	uint32 Pitch = 0;
-	switch (Format)
+	int32 W = 0, H = 0;
+	EPixelFormat Format = RenderTarget->GetFormat();
+	const int32 Dims = Tensor.Shape.Num();
+	const bool bBytesRGBA = Tensor.IsValid() && Tensor.DType == EPyDType::UInt8 && !bChannelsFirst && Dims >= 3 && Tensor.Shape[Dims - 1] == 4
+		&& (Format == PF_B8G8R8A8 || Format == PF_R8G8B8A8);
+	if (bBytesRGBA)
+	{
+		//Fast path for video: (H, W, 4) uint8 RGBA into an RGBA8 target, without float conversion
+		H = (int32)Tensor.Shape[Dims - 3];
+		W = (int32)Tensor.Shape[Dims - 2];
+		if (RenderTarget->SizeX != W || RenderTarget->SizeY != H)
+		{
+			RenderTarget->ResizeTarget(W, H);
+			Format = RenderTarget->GetFormat();
+		}
+		Pitch = W * 4;
+		Data.SetNumUninitialized((int64)Pitch * H);
+		const uint8* Src = Tensor.Data.GetData();
+		uint8* Dst = Data.GetData();
+		if (Format == PF_R8G8B8A8)
+		{
+			FMemory::Memcpy(Dst, Src, Data.Num());
+		}
+		else
+		{
+			for (int64 i = 0, N = (int64)W * H; i < N; ++i)
+			{
+				Dst[i * 4 + 0] = Src[i * 4 + 2];
+				Dst[i * 4 + 1] = Src[i * 4 + 1];
+				Dst[i * 4 + 2] = Src[i * 4 + 0];
+				Dst[i * 4 + 3] = Src[i * 4 + 3];
+			}
+		}
+	}
+	TArray<FLinearColor> Pixels;
+	FString Error;
+	if (!bBytesRGBA && !TensorToPixels(Tensor, bChannelsFirst, Pixels, W, H, Error))
+	{
+		UE_LOG(LogPythonCLI, Warning, TEXT("WriteTensorToRenderTarget: %s"), *Error);
+		return false;
+	}
+	if (!bBytesRGBA && (RenderTarget->SizeX != W || RenderTarget->SizeY != H))
+	{
+		RenderTarget->ResizeTarget(W, H);
+		Format = RenderTarget->GetFormat();
+	}
+	switch (bBytesRGBA ? PF_Unknown : Format)
 	{
 	case PF_B8G8R8A8:
 	case PF_R8G8B8A8:
@@ -402,6 +440,12 @@ bool UPythonImageLibrary::WriteTensorToRenderTarget(const FPyTensor& Tensor, UTe
 		Data.SetNumUninitialized(Pitch * H);
 		FMemory::Memcpy(Data.GetData(), Pixels.GetData(), Data.Num());
 		break;
+	case PF_Unknown:
+		if (bBytesRGBA)
+		{
+			break; //Already converted
+		}
+		[[fallthrough]];
 	default:
 		UE_LOG(LogPythonCLI, Warning, TEXT("WriteTensorToRenderTarget: render target format %s isn't supported (RGBA8, RGBA16f or RGBA32f)"), GetPixelFormatString(Format));
 		return false;

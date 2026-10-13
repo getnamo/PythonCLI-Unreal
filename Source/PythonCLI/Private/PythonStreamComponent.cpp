@@ -22,10 +22,11 @@ UPythonComponent* UPythonStreamComponent::ResolvePythonComponent()
 	return PythonComponent;
 }
 
-void UPythonStreamComponent::SetTargetService(UPythonService* Service, const FString& Function)
+void UPythonStreamComponent::SetTargetService(UPythonService* Service, const FString& Function, const FString& InfoJson)
 {
 	TargetService = Service;
 	TargetFunction = Function;
+	TargetInfoJson = InfoJson;
 }
 
 bool UPythonStreamComponent::OpenStream()
@@ -73,6 +74,14 @@ bool UPythonStreamComponent::OpenStream()
 		if (!Config.Info.IsValid())
 		{
 			Config.Info = MakeShared<FJsonObject>();
+		}
+		TSharedPtr<FJsonObject> Extra;
+		if (!TargetInfoJson.IsEmpty() && FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(TargetInfoJson), Extra) && Extra.IsValid())
+		{
+			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Extra->Values)
+			{
+				Config.Info->SetField(Field.Key, Field.Value);
+			}
 		}
 		Config.Info->SetStringField(TEXT("name"), StreamName);
 		if (!TargetFunction.IsEmpty())

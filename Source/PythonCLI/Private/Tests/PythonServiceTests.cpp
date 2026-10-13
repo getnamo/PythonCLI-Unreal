@@ -204,7 +204,7 @@ bool FPythonServiceStreamTest::RunTest(const FString&)
 		St->StreamName = TEXT("cam");
 		St->Policy = EPythonStreamPolicy::Lockstep;
 		St->MaxFrameBytes = 1024;
-		St->SetTargetService(S, TEXT("process_frame"));
+		St->SetTargetService(S, TEXT("process_frame"), TEXT("{\"extra\": 1}"));
 		St->RegisterComponent();
 		Actor->DispatchBeginPlay();
 		Streams.Add(St);

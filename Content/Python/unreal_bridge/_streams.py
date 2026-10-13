@@ -73,9 +73,26 @@ class StreamState:
         self.received = 0
         self.skipped = 0
         self.closed = False
+        self.on_close = []  # fn(stream), once, before the region is unmapped (e.g. to unregister it from CUDA)
+        self.user = {}  # per-stream state for whoever handles it
+
+    @property
+    def address(self):
+        """The shared-memory region's address and size ((0, 0) for inline streams): for pinning it with CUDA."""
+        if self.region is None:
+            return 0, 0
+        import ctypes
+        return ctypes.addressof(ctypes.c_char.from_buffer(self.region.buf)), len(self.region.buf)
 
     def close(self):
-        self.closed = True
+        if not self.closed:
+            self.closed = True
+            for fn in self.on_close:
+                try:
+                    fn(self)
+                except Exception:  # noqa: BLE001
+                    pass
+            self.on_close = []
         return self.region is None or self.region.close()
 
 
