@@ -30,25 +30,7 @@ TSharedPtr<FPythonProcess, ESPMode::ThreadSafe> UPythonComponent::GetProcess()
 
 FString UPythonComponent::ResolveScriptPath() const
 {
-	//The project's scripts first, then folders other plugins registered, then this plugin's Content/Python.
-	//"my_model" also finds my_model.py (TensorFlow-Unreal 1.x named modules without the extension).
-	TArray<FString> Roots = { FPaths::ProjectDir() / ScriptParams.ScriptRoot };
-	Roots.Append(FPythonEnvironment::GetScriptDirectories());
-	Roots.Add(FPythonEnvironment::PluginPythonDir());
-	const bool bNoExtension = FPaths::GetExtension(ScriptParams.Script).IsEmpty();
-	for (const FString& Root : Roots)
-	{
-		const FString Path = FPaths::ConvertRelativePathToFull(Root / ScriptParams.Script);
-		if (FPaths::FileExists(Path))
-		{
-			return Path;
-		}
-		if (bNoExtension && FPaths::FileExists(Path + TEXT(".py")))
-		{
-			return Path + TEXT(".py");
-		}
-	}
-	return FPaths::ConvertRelativePathToFull(Roots[0] / ScriptParams.Script);
+	return FPythonEnvironment::ResolveScriptPath(ScriptParams);
 }
 
 void UPythonComponent::BeginPlay()
@@ -301,30 +283,15 @@ void UPythonComponent::HandleFrame(const FPythonFrame& Frame)
 		const FString Message = H->GetStringField(TEXT("msg"));
 		if (bLogScriptOutput)
 		{
-			TArray<FString> Lines;
-			Message.ParseIntoArrayLines(Lines, false);
-			for (const FString& Line : Lines)
-			{
-				if (Level == TEXT("error")) { UE_LOG(LogPythonCLI, Error, TEXT("[python %s] %s"), *Script, *Line); }
-				else if (Level == TEXT("warning")) { UE_LOG(LogPythonCLI, Warning, TEXT("[python %s] %s"), *Script, *Line); }
-				else { UE_LOG(LogPythonCLI, Log, TEXT("[python %s] %s"), *Script, *Line); }
-			}
+			PythonWire::LogScriptMessage(Script, Level, Message);
 		}
 		OnLog.Broadcast(Message, Level);
 		return;
 	}
 	case PythonWire::Event:
 	{
-		FPythonEventData Data;
-		Data.Name = H->GetStringField(TEXT("name"));
+		FPythonEventData Data = PythonWire::ParseEvent(H, Frame.Binary);
 		Data.Script = Script;
-		const TSharedPtr<FJsonValue> Args = H->TryGetField(TEXT("args"));
-		if (Args.IsValid() && Args->Type == EJson::Array)
-		{
-			Data.Args = Args->AsArray();
-		}
-		Data.JsonArgs = PythonWire::ToJsonString(Data.Args);
-		Data.Tensors = PythonWire::UnpackTensors(Args, Frame.Binary);
 		if (HandleScriptEvent(Data))
 		{
 			return;
@@ -344,20 +311,7 @@ void UPythonComponent::HandleFrame(const FPythonFrame& Frame)
 		{
 			return;
 		}
-		FPythonCallResult R;
-		R.bSuccess = H->GetBoolField(TEXT("ok"));
-		if (R.bSuccess)
-		{
-			R.Result = H->TryGetField(TEXT("result"));
-			R.JsonResult = PythonWire::ToJsonString(R.Result);
-			R.Tensors = PythonWire::UnpackTensors(R.Result, Frame.Binary);
-		}
-		else
-		{
-			H->TryGetStringField(TEXT("error"), R.Error);
-			H->TryGetStringField(TEXT("traceback"), R.Traceback);
-		}
-		Callback(R);
+		Callback(PythonWire::ParseReply(H, Frame.Binary));
 		return;
 	}
 	default:

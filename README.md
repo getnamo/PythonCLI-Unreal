@@ -5,9 +5,9 @@ Run Python in Unreal Engine with a portable interpreter and a per-project venv v
 
 Scripts run **out of process**: e.g. a crash in a native ML library never takes the editor down, and the GIL never touches the game thread. Components talk to their scripts with events in both directions (JSON plus raw binary and tensors) and call Python functions with replies.
 
-It's the base for the [TensorFlow-Unreal](https://github.com/getnamo/TensorFlow-Unreal) 2.0 refactor, and for PyTorch workflows.
+It's the base for [TensorFlow-Unreal](https://github.com/getnamo/TensorFlow-Unreal) 2.0 and [PyTorch-Unreal](https://github.com/getnamo/pytorch-unreal).
 
-Status: **0.4.0 (beta)**. Win64 tested in the editor and in packaged builds; Linux x86_64 tested in packaged builds.
+Status: **0.5.0 (beta)**. Win64 tested in the editor and in packaged builds; Linux x86_64 tested in packaged builds (0.4.0).
 
 | Piece | What it is |
 |---|---|
@@ -112,6 +112,47 @@ def act(frame):
   - Render-target readback: ready about 2 frames after capture.
 - **Example:** `examples/streams.py` handles all four kinds.
 
+## Services and jobs
+
+A **Python service** is a script host that no actor owns: any Blueprint, component or system can call it, stream to it and start jobs in it. Services live as long as the engine, across PIE sessions.
+
+```cpp
+UPythonService* Service = UPythonSubsystem::Get()->GetService(TEXT("vision"), TEXT("vision_service.py"), EPythonServiceProcess::Shared, {});
+Service->CallFunction(TEXT("classify"), TEXT("[]"), { Image }, [](const FPythonCallResult& R) { /* ... */ });
+Service->OnNativeEvent(TEXT("detected")).AddLambda([](const FPythonEventData& E) { /* ... */ });
+UPythonJob* Job = Service->StartJob(TEXT("train"), TEXT("{\"epochs\": 3}"), /*bResume*/ false, /*RunsDir*/ TEXT(""));
+```
+
+- **Getting one:** in Blueprint, **Get Service** on the Python subsystem, then **Call Python Service** and **Start Python Job**, both async nodes.
+- **Processes:**
+  - **Shared** runs in the warm shared process.
+  - **Dedicated** gets its own process, for crash isolation or a training job that shouldn't share the GIL with inference.
+- **Deferred replies:** a call's handler can answer later, from any thread and out of order. Replies are matched by call id. Two ways:
+  - call `ue.defer()` and later `.resolve(value)` / `.reject(error)`;
+  - or return a `concurrent.futures.Future`.
+
+  This is how a model batches concurrent requests into one forward pass.
+- **Jobs:** a `@ue.job` function runs on its own thread with progress, metrics, a run folder and a clean stop. See the example below.
+
+  ```python
+  @ue.job("train")
+  def train(job, epochs: int = 5, lr: float = 1e-3):     # typed parameters, from Unreal's JSON
+      for epoch in job.range(epochs):                     # progress; ends early on Stop; resumable
+          for batch in job.track(loader):                 # progress within the epoch
+              ...
+          job.metrics(epoch=epoch, loss=loss)             # On Metrics; <run>/metrics.jsonl
+          job.save_state(best=best)                       # <run>/state.json, back as job.state on resume
+      return {"accuracy": acc}                            # On Completed (Result Json)
+  ```
+
+  - **Runs:** each start makes `<RunsDir>/<job>/<timestamp>/` with `config.json`, `metrics.jsonl`, `state.json` and `result.json`. The default RunsDir is `Saved/PythonCLI/Runs`.
+  - **Resume:** continues the job's latest run, and `job.range` picks up after the last finished step.
+  - **The job object (`UPythonJob`)** has State, Progress, Last Metrics, Result and Run Dir, and Stop. Its events are On Progress, On Metrics, On Finished and On Failed.
+  - **Unloading the script** stops its jobs first.
+- **Streams into a service:** **Set Target Service** (service, function) on any stream component sends its frames to the service.
+  - The function gets each frame; for Lockstep, its return value is the step's result.
+  - Several components can stream to one service under the same stream name.
+
 ## Machine learning
 
 A **Python ML** component (`UPythonMLComponent`) runs scripts written against the ML plugin API. That's the TensorFlow-Unreal / ml-remote-server contract; [TensorFlow-Unreal](https://github.com/getnamo/TensorFlow-Unreal) 2.0's component builds on it.
@@ -169,6 +210,8 @@ How it behaves:
   - `FPythonEnvironment::RegisterRequirementsFile` adds requirements (`UnregisterRequirementsFile` removes them).
   - `RegisterScriptDirectory` adds a folder: scripts resolve there after the project's, and it goes on `sys.path`.
   - `RegisterEnvironmentVariable` sets a variable for new processes; the project's settings win.
+  - `RegisterPackagedRequirementsFile` and `SetDefaultPackagedTorchBackend` set what packaged builds install (see Packaging).
+- **Packages that find their own files through `sysconfig`** (platlib/purelib) see the venv's site-packages, as in an activated venv. triton-windows needs this for its bundled compiler and CUDA headers, so `torch.compile` works without MSVC or a CUDA toolkit.
 
 ## Packaging
 
@@ -185,6 +228,10 @@ Packaged builds (Win64 and Linux) ship the interpreter, the bridge and the proje
 - **Caching:** the install is cached in `Intermediate/PythonCLI/packaged/<Platform>`. It repeats only when the requirements, the index settings or the runtime change.
 - **Size:** C headers and bytecode caches are left out. The tensorflow-cpu environment is about 1.2 GB (Linux) to 1.3 GB (Win64); CUDA builds of torch or TensorFlow are several GB. Install On First Run keeps that out of the build.
 - **Packaged games** keep their process configs, and with Install On First Run the venv, in `Saved/PythonCLI`.
+- **Other requirements for packaged builds:** for example CPU torch in the game while the editor uses CUDA.
+  - Turn on **Override Packaged Requirements** and list **Packaged Requirements** and a **Packaged Torch Backend**, or let a plugin register them.
+  - Bundle and Install On First Run then install those instead of the editor's environment.
+  - Setup writes them to `Intermediate/PythonCLI/requirements-packaged.txt` for packaging.
 
 ## Python API (`unreal_bridge`)
 
@@ -204,6 +251,9 @@ Packaged builds (Win64 and Linux) ship the interpreter, the bridge and the proje
 | `ue.Tensor` | tensor type used without numpy (`.data`, `.dtype`, `.shape`, `.tolist()`, `Tensor.from_list`) |
 | `ue.content_path(*parts)` | a path under the project's Content folder |
 | `unreal_bridge.ml.MLPluginAPI` / `TFPluginAPI`, `ue.keras.StopOnRequest(api)` / `ProgressEvents(api)` | the ML plugin API (see Machine learning) |
+| `ue.defer()` → `Deferred` | answer the current call later: `.resolve(value)`, `.reject(error)`, from any thread; or return a `concurrent.futures.Future` |
+| `@ue.job("name")` / `@ue.job`, `ue.Job` | jobs: `job.range`, `job.track`, `job.progress`, `job.metrics`, `job.save_state` / `job.state`, `job.should_stop`, `job.check()`, `job.wait(s)`, `job.run_dir`, `job.resumed`, `job.log` |
+| `frame.defer()` | keep a stream frame (and its Lockstep step unanswered) after the handler returns; `frame.reply(value)` later |
 
 ## C++
 
@@ -216,15 +266,19 @@ Python->BindEventNative(TEXT("action"), [](const FPythonEventData& E) { /* E.Arg
 // Commit, or Push; Step for lockstep.
 ```
 
+**Images:** `UPythonImageLibrary` converts in both directions. In Blueprint: Texture / Render Target To Tensor, Tensor To Texture, Update Texture From Tensor, Write Tensor To Render Target.
+- **Options:** channels, normalization (0..1, -1..1, raw, ImageNet), resize, invert, channels first.
+- **Render targets:** writing a tensor into one happens on the render thread; RGBA8, RGBA16f and RGBA32f are supported.
+
 ## Tests
 
-- Engine-free protocol tests drive `runtime.py` over frames exactly as Unreal does, streams and the ML API included (63 checks):
+- Engine-free protocol tests drive `runtime.py` over frames exactly as Unreal does, streams, the ML API, deferred replies and jobs included (86 checks):
   `ThirdParty/python/Win64/python.exe -I Content/Python/tests/harness.py [--site <venv>/Lib/site-packages]`
   On Linux: `ThirdParty/python/Linux/bin/python3.12 -I Content/Python/tests/harness.py`
-- In-engine tests (`PythonCLI.*`, 25 of them):
+- In-engine tests (`PythonCLI.*`, 31 of them):
   `UnrealEditor-Cmd.exe <Project>.uproject -ExecCmds="Automation RunTests PythonCLI; Quit" -unattended -nullrhi -nopause`
   - `PythonCLI.Environment.Requirements` installs numpy, so it needs network access or a warm uv cache.
-  - `PythonCLI.Streams.RenderTarget` needs a real RHI: run it with `-RenderOffscreen` instead of `-nullrhi`.
+  - `PythonCLI.Streams.RenderTarget` and the render-target half of `PythonCLI.Image.Tensors` need a real RHI: run them with `-RenderOffscreen` instead of `-nullrhi`.
   - `PythonCLI.Streams.Microphone` opens your microphone, so it only runs with `-PythonCLIMicTest`.
 - Packaged Development builds run the same tests: `<Game>.exe -ExecCmds="Automation RunTests PythonCLI; Quit" -unattended -nullrhi`. With Bundle, `PythonCLI.Environment.Requirements` is skipped, because the packages were fixed at packaging time.
 
@@ -243,7 +297,11 @@ Frames (same layout as CLISystem's `FCLIFrameCodec`, magic `PUE\x01`): `MAGIC | 
 | 7 | STREAM | UE → py | `owner, stream, seq, slot, t, frame, dtype, shape, nbytes, layout?, meta?, sid?` + inline data (shared-memory streams: none) |
 | 8 | ACK | py → UE | `owner, stream, slot, seq`: the slot is Unreal's again |
 
-`openStream` carries `stream, slots, slot_bytes, policy, shm` (a `{GUID}` region name, or null for inline) and `info`. Unreal handles ACKs and lockstep replies (`sid`) on its pipe thread, so they arrive while the game thread is blocked in a step.
+`openStream` carries `stream, slots, slot_bytes, policy, shm` (a `{GUID}` region name, or null for inline) and `info`. In `info`, `call` names a function that handles the frames, and `name` is the logical stream name when several components stream to one owner.
+
+**Jobs:**
+- Calls: `_job_start(id, name, params, options)` (options: `resume`, `runs_dir`), `_job_stop(id)` and `_job_list()`.
+- Python sends `_job` events: `{id, kind, ...}`, where kind is `started`, `progress`, `metrics`, `completed`, `stopped` or `failed`. Unreal handles ACKs and lockstep replies (`sid`) on its pipe thread, so they arrive while the game thread is blocked in a step.
 
 `runtime.py` keeps the protocol on a private copy of stdout and redirects fd 1/2 into a capture pipe. Output from native code therefore can't corrupt frames; it arrives as RAWLOG. A hard crash's `faulthandler` dump arrives as stray text, which is logged.
 

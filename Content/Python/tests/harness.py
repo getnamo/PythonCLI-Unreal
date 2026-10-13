@@ -24,6 +24,7 @@ BROKEN = os.path.join(HERE, "scripts", "broken.py")
 STREAMS = os.path.join(HERE, "scripts", "streams.py")
 ML_FIXTURE = os.path.join(HERE, "scripts", "ml_fixture.py")
 ML_LEGACY = os.path.join(HERE, "scripts", "ml_legacy.py")
+SERVICES = os.path.join(HERE, "scripts", "services.py")
 results = []
 
 
@@ -307,6 +308,124 @@ def ml_tests(b):
     b.control(cmd="stopOwner", owner="m3")
 
 
+def job_events(b, job_id, kinds=None, timeout=10.0):
+    """The '_job' events of one job so far (waits for one of `kinds` first, if given)."""
+    if kinds:
+        b.wait(lambda t, h, x: t == F.EVENT and h.get("name") == "_job" and h["args"][0].get("id") == job_id and h["args"][0].get("kind") in kinds, timeout)
+    with b.cv:
+        return [f[1]["args"][0] for f in b.frames if f[0] == F.EVENT and f[1].get("name") == "_job" and f[1]["args"][0].get("id") == job_id]
+
+
+def v05_tests(b, site):
+    """PythonCLI 0.5: deferred replies, jobs, streams bound to a function, sysconfig paths."""
+    S, O = "services.py", "sv"
+    b.clear()
+    b.control(cmd="start", owner=O, script=S, path=SERVICES)
+    check("services fixture started", b.status("started", O, S) is not None)
+
+    # deferred replies: answered from other threads, out of order
+    first = b.event(O, S, "slow_square", [3, 0.4], call=True)
+    second = b.event(O, S, "slow_square", [4, 0.05], call=True)
+    r2, r1 = b.reply(second), b.reply(first)
+    with b.cv:
+        order = [f[1].get("id") for f in b.frames if f[0] == F.REPLY and f[1].get("id") in (first, second)]
+    check("deferred replies: resolved from another thread, the return value is ignored", r1 is not None and r1[1]["result"] == 9 and r2 is not None and r2[1]["result"] == 16, (r1 and r1[1], r2 and r2[1]))
+    check("deferred replies arrive out of order", order == [second, first], order)
+    r = b.call(O, S, "future_double", [21])
+    check("a returned Future is the reply", r is not None and r[1]["ok"] and r[1]["result"] == 42, r and r[1])
+    r = b.call(O, S, "future_fail", [])
+    check("a failed Future is an error reply", r is not None and not r[1]["ok"] and "future failed on purpose" in r[1]["error"] and "Traceback" in r[1].get("traceback", ""), r and r[1])
+    r = b.call(O, S, "deferred_reject", [])
+    check("reject()", r is not None and not r[1]["ok"] and r[1]["error"] == "rejected on purpose", r and r[1])
+    r = b.call(O, S, "raise_after_defer", [])
+    check("an exception after defer() rejects the call", r is not None and not r[1]["ok"] and "raised after defer" in r[1]["error"], r and r[1])
+    held = [b.event(O, S, "hold", [i], call=True) for i in (1, 2)]
+    r = b.call(O, S, "release", [])
+    got = [b.reply(i) for i in held]
+    check("held calls answered by a later call", r is not None and r[1]["result"] == 2 and [g[1]["result"] for g in got if g] == [1001, 1002], (r and r[1], [g and g[1] for g in got]))
+    r = b.call(O, S, "defer_outside_call", [])
+    check("ue.defer() off the call's thread raises", r is not None and "inside a call" in str(r[1].get("result")), r and r[1])
+    if site:
+        r = b.call(O, S, "platlib", [])
+        check("sysconfig platlib/purelib name the site dir (triton-windows finds its files)", r is not None and r[1]["result"] == {"platlib": site[0], "purelib": site[0]}, r and r[1])
+
+    # jobs
+    runs = tempfile.mkdtemp(prefix="pythoncli_runs_")
+    opts = {"runs_dir": runs}
+    r = b.call(O, S, "_job_list", [])
+    names = {j["name"]: j for j in r[1]["result"]} if r and r[1]["ok"] else {}
+    check("job list with typed parameters", set(names) == {"count", "tracked", "raises_stop"} and names["count"]["params"][0] == {"name": "steps", "type": "int", "default": 10, "required": False}, r and r[1])
+    b.clear()
+    r = b.call(O, S, "_job_start", ["j1", "count", {"steps": "5", "delay": 0.001}, opts])
+    done = job_events(b, "j1", {"completed", "failed"})
+    kinds = [e["kind"] for e in done]
+    final = done[-1] if done else {}
+    check("job runs: started, progress, metrics, completed with the result", r is not None and r[1]["ok"] and kinds and kinds[0] == "started" and "progress" in kinds
+          and kinds.count("metrics") == 5 and final.get("kind") == "completed" and final.get("result") == {"total": 10, "resumed": False, "start_state": 5}, (r and r[1], kinds, final))
+    run_dir = r[1]["result"]["run_dir"] if r and r[1]["ok"] else ""
+    metrics_file, result_file = os.path.join(run_dir, "metrics.jsonl"), os.path.join(run_dir, "result.json")
+    lines = open(metrics_file).read().splitlines() if run_dir and os.path.exists(metrics_file) else []
+    result = json.load(open(result_file)) if run_dir and os.path.exists(result_file) else {}
+    check("run folder: config.json, metrics.jsonl, state.json, result.json", len(lines) == 5 and json.loads(lines[2])["value"] == 1.0 and result.get("status") == "completed"
+          and os.path.exists(os.path.join(run_dir, "config.json")) and os.path.exists(os.path.join(run_dir, "state.json")), (run_dir, lines[:1], result))
+
+    b.clear()
+    b.call(O, S, "_job_start", ["j2", "count", {"steps": 1000, "delay": 0.01}, opts])
+    b.wait(lambda t, h, x: t == F.EVENT and h.get("name") == "_job" and h["args"][0].get("kind") == "metrics" and (h["args"][0].get("step") or 0) >= 3)
+    r = b.call(O, S, "_job_start", ["j2b", "count", {}, opts])
+    check("the same job can't run twice at once", r is not None and not r[1]["ok"] and "already running" in r[1]["error"], r and r[1])
+    t0 = time.time()
+    r = b.call(O, S, "_job_stop", ["j2"])
+    done = job_events(b, "j2", {"stopped", "completed", "failed"})
+    check("stop ends a job promptly as 'stopped'", r is not None and r[1]["result"] is True and done and done[-1]["kind"] == "stopped" and time.time() - t0 < 2, done and done[-1])
+
+    b.clear()
+    r = b.call(O, S, "_job_start", ["j3", "count", {"steps": 20, "delay": 0.0}, {**opts, "resume": True}])
+    done = job_events(b, "j3", {"completed", "failed"})
+    started = done[0] if done else {}
+    final = done[-1] if done else {}
+    check("resume continues the latest run where job.range stopped", r is not None and r[1]["ok"] and r[1]["result"]["resumed"] and started.get("resumed") is True
+          and final.get("kind") == "completed" and final["result"]["resumed"] and 3 <= final["result"]["start_state"] < 1000 and r[1]["result"]["run_dir"] != run_dir,
+          (r and r[1], started, final))
+
+    b.clear()
+    b.call(O, S, "_job_start", ["j4", "count", {"steps": 5, "fail_at": 2}, opts])
+    done = job_events(b, "j4", {"failed", "completed"})
+    check("a failing job reports its error and traceback", done and done[-1]["kind"] == "failed" and "job failed on purpose" in done[-1]["error"] and "Traceback" in done[-1]["traceback"], done and done[-1])
+    r = b.call(O, S, "_job_start", ["j5", "nope", {}, opts])
+    check("unknown job is an error reply", r is not None and not r[1]["ok"] and "has no job 'nope'" in r[1]["error"], r and r[1])
+    r = b.call(O, S, "_job_start", ["j6", "count", {"stepz": 1}, opts])
+    check("unknown parameter is an error reply", r is not None and not r[1]["ok"] and "no parameter 'stepz'" in r[1]["error"], r and r[1])
+
+    b.clear()
+    b.call(O, S, "_job_start", ["j7", "tracked", {"items": 40}, opts])
+    done = job_events(b, "j7", {"completed", "failed"})
+    progress = [e["progress"] for e in done if e["kind"] == "progress"]
+    check("job.track reports progress", done and done[-1].get("result") == 40 and len(progress) >= 2 and progress == sorted(progress) and progress[-1] <= 1.0, (done and done[-1], progress))
+
+    b.clear()
+    b.call(O, S, "_job_start", ["j8", "raises_stop", {}, opts])
+    job_events(b, "j8", {"started"})
+    b.call(O, S, "_job_stop", ["j8"])
+    done = job_events(b, "j8", {"stopped", "failed"})
+    check("job.check() raises JobStopped: 'stopped', not 'failed'", done and done[-1]["kind"] == "stopped", done and done[-1])
+
+    # a stream bound to a function (info "call"), with a per-binding name
+    p = Producer(b, O, S, "cam#1", 1, 64, policy="lockstep", shm=False, info={"call": "process_frame", "name": "cam"})
+    rep = p.step(floats([1, 2, 3.5]), "float32", [3], sid=901)
+    check("stream bound to a function (info call)", rep is not None and rep["ok"] and rep["result"] == {"sum": 6.5, "name": "cam"}, rep)
+    p.close()
+
+    # unloading the script stops its jobs
+    b.clear()
+    b.call(O, S, "_job_start", ["j9", "count", {"steps": 1000, "delay": 0.01}, opts])
+    job_events(b, "j9", {"metrics"})
+    t0 = time.time()
+    b.control(cmd="stop", owner=O, script=S)
+    done = job_events(b, "j9", {"stopped", "failed"})
+    check("script stop stops its jobs first", done and done[-1]["kind"] == "stopped" and b.status("stopped", O, S) is not None and time.time() - t0 < 3, done and done[-1])
+
+
 def stream_tests(b, numpy):
     S = "streams.py"
     b.control(cmd="start", owner="s1", script=S, path=STREAMS)
@@ -543,6 +662,9 @@ def main():
 
     # ML API
     ml_tests(b)
+
+    # 0.5: deferred replies, jobs, streams bound to functions
+    v05_tests(b, site)
 
     # exit
     b.clear()

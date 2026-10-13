@@ -7,12 +7,14 @@
 #include "PythonStreamComponent.generated.h"
 
 class UPythonComponent;
+class UPythonService;
 
 /**
  * Streams frames to a Python script: @ue.on_stream(StreamName) handlers, or `for frame in ue.stream(...)`.
- * Frames go to the script of PythonComponent (by default the first Python component on the same actor).
- * This base class streams tensors you push (PushTensor, or StepTensor for Lockstep); the subclasses stream
- * observations, render targets and audio.
+ * Frames go to the script of PythonComponent (by default the first Python component on the same actor), or
+ * to a Python service (SetTargetService), where a function can handle them. This base class streams tensors
+ * you push (PushTensor, or StepTensor for Lockstep); the subclasses stream observations, render targets and
+ * audio.
  */
 UCLASS(ClassGroup = "Python", meta = (BlueprintSpawnableComponent))
 class PYTHONCLI_API UPythonStreamComponent : public UActorComponent
@@ -53,6 +55,16 @@ public:
 	/** Whose script gets the frames. Unset: the first Python component on this actor. */
 	UPROPERTY(BlueprintReadWrite, Category = "Python Stream")
 	TObjectPtr<UPythonComponent> PythonComponent;
+
+	/** Send the frames to a Python service instead of a component (call before the stream opens, or reopen
+	 it). Function: a function in the service's script that gets each frame (fn(frame); for Lockstep its
+	 return value is the step's result); empty: its @ue.on_stream(StreamName) handlers. Several streams can
+	 target one service with the same StreamName. */
+	UFUNCTION(BlueprintCallable, Category = "Python Stream", meta = (AutoCreateRefTerm = "Function"))
+	void SetTargetService(UPythonService* Service, const FString& Function);
+
+	UFUNCTION(BlueprintPure, Category = "Python Stream")
+	UPythonService* GetTargetService() const { return TargetService; }
 
 	/** Tell Python about the stream (and create its shared memory). Frames before the script runs are
 	 delivered once it has started. */
@@ -95,4 +107,8 @@ protected:
 	UPythonComponent* ResolvePythonComponent();
 
 	TSharedPtr<FPythonStream, ESPMode::ThreadSafe> Stream;
+
+	UPROPERTY()
+	TObjectPtr<UPythonService> TargetService;
+	FString TargetFunction;
 };

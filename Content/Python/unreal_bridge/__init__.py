@@ -9,9 +9,18 @@
     def add(a, b):                      # Unreal: CallFunction("add", "[2,3]") -> 5
         return a + b
 
+    def slow(x):                        # reply later, from any thread (out of order is fine)
+        reply = ue.defer()
+        pool.submit(lambda: reply.resolve(work(x)))   # (or return a concurrent.futures.Future)
+
     @ue.on_stream("camera")            # Unreal: a Python Render Target Stream named "camera"
     def see(frame):
         frame.array                     # (H, W, 4) uint8 view of the shared-memory slot; frame.rgb()
+
+    @ue.job("train")                    # Unreal: StartJob("train", {"epochs": 3}) on a Python service
+    def train(job, epochs: int = 5):
+        for epoch in job.range(epochs):  # progress, stop, resume (unreal_bridge/jobs.py)
+            job.metrics(loss=...)
 
     def on_start(): ...                 # optional: after the script loads
     def on_stop(): ...                  # optional: before it unloads (stop, reload, exit)
@@ -24,12 +33,14 @@ import os
 
 from . import _host as _h
 from . import _streams
+from ._host import Deferred, defer
 from ._host import current_context as _ctx
 from ._streams import StreamFrame
 from ._values import Tensor, numpy_version
+from .jobs import Job, JobStopped, job
 from .ml import MLPluginAPI, TFPluginAPI
 
-__all__ = ["on", "on_stream", "stream", "emit", "log", "warning", "error", "args", "should_stop", "stopping",
+__all__ = ["on", "on_stream", "stream", "emit", "defer", "Deferred", "job", "Job", "JobStopped", "log", "warning", "error", "args", "should_stop", "stopping",
            "run_in_background", "script_path", "script_dir", "project_dir", "content_dir", "owner", "Tensor",
            "StreamFrame", "numpy_version", "content_path", "MLPluginAPI", "TFPluginAPI", "keras"]
 

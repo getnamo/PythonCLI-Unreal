@@ -45,6 +45,14 @@ void UPythonSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 
 void UPythonSubsystem::Deinitialize()
 {
+	for (TPair<FString, TObjectPtr<UPythonService>>& Pair : Services)
+	{
+		if (Pair.Value)
+		{
+			Pair.Value->Shutdown();
+		}
+	}
+	Services.Reset();
 	if (SharedProcess.IsValid())
 	{
 		SharedProcess->Stop(GetDefault<UPythonCLISettings>()->ShutdownGraceSeconds, /*bWait*/ true);
@@ -71,6 +79,49 @@ TSharedPtr<FPythonProcess, ESPMode::ThreadSafe> UPythonSubsystem::CreateDedicate
 	TSharedPtr<FPythonProcess, ESPMode::ThreadSafe> Process = MakeShared<FPythonProcess, ESPMode::ThreadSafe>(Name);
 	Process->Start(Environment);
 	return Process;
+}
+
+UPythonService* UPythonSubsystem::GetService(const FString& Name, const FString& Script, EPythonServiceProcess Process, const TArray<FString>& Args, bool bStart)
+{
+	if (TObjectPtr<UPythonService>* Found = Services.Find(Name))
+	{
+		UPythonService* Existing = *Found;
+		if (!Script.IsEmpty() && Existing->ScriptParams.Script != Script)
+		{
+			UE_LOG(LogPythonCLI, Warning, TEXT("Python service '%s' already runs %s (asked for %s)"), *Name, *Existing->ScriptParams.Script, *Script);
+		}
+		if (bStart)
+		{
+			Existing->Start();
+		}
+		return Existing;
+	}
+	UPythonService* Service = NewObject<UPythonService>(this);
+	FPythonScriptParams Params;
+	Params.Script = Script;
+	Params.Args = Args;
+	Service->Configure(Name, Params, Process);
+	Services.Add(Name, Service);
+	if (bStart)
+	{
+		Service->Start();
+	}
+	return Service;
+}
+
+UPythonService* UPythonSubsystem::FindService(const FString& Name) const
+{
+	const TObjectPtr<UPythonService>* Found = Services.Find(Name);
+	return Found ? Found->Get() : nullptr;
+}
+
+void UPythonSubsystem::StopService(const FString& Name)
+{
+	TObjectPtr<UPythonService> Service;
+	if (Services.RemoveAndCopyValue(Name, Service) && Service)
+	{
+		Service->Shutdown();
+	}
 }
 
 void UPythonSubsystem::SetupEnvironment(bool bForceReinstall)

@@ -2,6 +2,7 @@
 #include "PythonCLI.h"
 #include "PythonComponent.h"
 #include "PythonProcess.h"
+#include "PythonService.h"
 #include "Dom/JsonObject.h"
 #include "GameFramework/Actor.h"
 #include "Serialization/JsonReader.h"
@@ -21,33 +22,64 @@ UPythonComponent* UPythonStreamComponent::ResolvePythonComponent()
 	return PythonComponent;
 }
 
+void UPythonStreamComponent::SetTargetService(UPythonService* Service, const FString& Function)
+{
+	TargetService = Service;
+	TargetFunction = Function;
+}
+
 bool UPythonStreamComponent::OpenStream()
 {
 	if (Stream.IsValid() && Stream->IsOpen())
 	{
 		return true;
 	}
-	UPythonComponent* Python = ResolvePythonComponent();
-	if (!Python)
+	FPythonStreamConfig Config;
+	TSharedPtr<FPythonProcess, ESPMode::ThreadSafe> Process;
+	if (TargetService)
 	{
-		UE_LOG(LogPythonCLI, Error, TEXT("Python stream '%s' (%s): no Python component to stream to"), *StreamName, *GetPathName());
-		return false;
+		//Streams are keyed by owner and name in Python: a name of its own per component, the logical name in info
+		TargetService->Start();
+		Process = TargetService->GetProcess();
+		Config.Owner = TargetService->GetOwnerId();
+		Config.Script = TargetService->ScriptParams.Script;
+		Config.Name = FString::Printf(TEXT("%s#%u"), *StreamName, GetUniqueID());
 	}
-	const TSharedPtr<FPythonProcess, ESPMode::ThreadSafe> Process = Python->GetProcess();
+	else
+	{
+		UPythonComponent* Python = ResolvePythonComponent();
+		if (!Python)
+		{
+			UE_LOG(LogPythonCLI, Error, TEXT("Python stream '%s' (%s): no Python component to stream to"), *StreamName, *GetPathName());
+			return false;
+		}
+		Process = Python->GetProcess();
+		Config.Owner = Python->GetOwnerId();
+		Config.Script = Python->ScriptParams.Script;
+		Config.Name = StreamName;
+	}
 	if (!Process.IsValid())
 	{
 		UE_LOG(LogPythonCLI, Error, TEXT("Python stream '%s': Python is not available"), *StreamName);
 		return false;
 	}
-	FPythonStreamConfig Config;
-	Config.Owner = Python->GetOwnerId();
-	Config.Script = Python->ScriptParams.Script;
-	Config.Name = StreamName;
 	Config.Policy = Policy;
 	Config.Transport = Transport;
 	Config.Slots = Slots;
 	Config.SlotBytes = GetFrameBytes();
 	Config.Info = MakeStreamInfo();
+	if (TargetService)
+	{
+		if (!Config.Info.IsValid())
+		{
+			Config.Info = MakeShared<FJsonObject>();
+		}
+		Config.Info->SetStringField(TEXT("name"), StreamName);
+		if (!TargetFunction.IsEmpty())
+		{
+			Config.Info->SetStringField(TEXT("call"), TargetFunction);
+		}
+	}
 	FString Error;
 	Stream = FPythonStream::Open(Process.ToSharedRef(), Config, Error);
 	if (!Stream.IsValid())

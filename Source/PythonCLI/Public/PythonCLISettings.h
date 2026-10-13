@@ -78,6 +78,21 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Packaging")
 	EPythonPackagedEnvMode PackagedEnvMode = EPythonPackagedEnvMode::Bundle;
 
+	/** Packaged builds (Bundle, Install On First Run) get Packaged Requirements instead of the editor's
+	 environment: e.g. CPU torch for the game while the editor uses CUDA. Plugins can register packaged
+	 requirements too (then they apply even when this is off). */
+	UPROPERTY(config, EditAnywhere, Category = "Packaging")
+	bool bOverridePackagedRequirements = false;
+
+	/** Pip requirement lines for packaged builds when overriding (e.g. "torch==2.14.*", "numpy"). */
+	UPROPERTY(config, EditAnywhere, Category = "Packaging", meta = (EditCondition = "bOverridePackagedRequirements"))
+	TArray<FString> PackagedRequirements;
+
+	/** uv --torch-backend for packaged builds with an override (e.g. "cpu"). Empty: what a plugin asks for,
+	 else the default build. */
+	UPROPERTY(config, EditAnywhere, Category = "Packaging")
+	FString PackagedTorchBackend;
+
 	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
 
 #if WITH_EDITOR

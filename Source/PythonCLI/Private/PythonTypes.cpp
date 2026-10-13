@@ -1,4 +1,5 @@
 #include "PythonTypes.h"
+#include "PythonCLI.h"
 #include "CLIFrameCodec.h"
 #include "Dom/JsonObject.h"
 #include "Serialization/JsonReader.h"
@@ -265,5 +266,59 @@ namespace PythonWire
 			}
 		}
 		return Out;
+	}
+
+	FPythonCallResult ParseReply(const TSharedPtr<FJsonObject>& Header, TConstArrayView<uint8> Binary)
+	{
+		FPythonCallResult R;
+		if (!Header.IsValid())
+		{
+			R.Error = TEXT("malformed reply");
+			return R;
+		}
+		Header->TryGetBoolField(TEXT("ok"), R.bSuccess);
+		if (R.bSuccess)
+		{
+			R.Result = Header->TryGetField(TEXT("result"));
+			R.JsonResult = ToJsonString(R.Result);
+			R.Tensors = UnpackTensors(R.Result, Binary);
+		}
+		else
+		{
+			Header->TryGetStringField(TEXT("error"), R.Error);
+			Header->TryGetStringField(TEXT("traceback"), R.Traceback);
+		}
+		return R;
+	}
+
+	FPythonEventData ParseEvent(const TSharedPtr<FJsonObject>& Header, TConstArrayView<uint8> Binary)
+	{
+		FPythonEventData Data;
+		if (!Header.IsValid())
+		{
+			return Data;
+		}
+		Header->TryGetStringField(TEXT("name"), Data.Name);
+		Header->TryGetStringField(TEXT("script"), Data.Script);
+		const TSharedPtr<FJsonValue> Args = Header->TryGetField(TEXT("args"));
+		if (Args.IsValid() && Args->Type == EJson::Array)
+		{
+			Data.Args = Args->AsArray();
+		}
+		Data.JsonArgs = ToJsonString(Data.Args);
+		Data.Tensors = UnpackTensors(Args, Binary);
+		return Data;
+	}
+
+	void LogScriptMessage(const FString& Script, const FString& Level, const FString& Message)
+	{
+		TArray<FString> Lines;
+		Message.ParseIntoArrayLines(Lines, false);
+		for (const FString& Line : Lines)
+		{
+			if (Level == TEXT("error")) { UE_LOG(LogPythonCLI, Error, TEXT("[python %s] %s"), *Script, *Line); }
+			else if (Level == TEXT("warning")) { UE_LOG(LogPythonCLI, Warning, TEXT("[python %s] %s"), *Script, *Line); }
+			else { UE_LOG(LogPythonCLI, Log, TEXT("[python %s] %s"), *Script, *Line); }
+		}
 	}
 }

@@ -151,4 +151,12 @@ namespace PythonWire
 
 	PYTHONCLI_API FString ToJsonString(const TSharedPtr<FJsonValue>& Value);
 	PYTHONCLI_API FString ToJsonString(const TArray<TSharedPtr<FJsonValue>>& Values);
+
+	/** A REPLY frame (header + binary table) -> the call's result or error. */
+	PYTHONCLI_API FPythonCallResult ParseReply(const TSharedPtr<class FJsonObject>& Header, TConstArrayView<uint8> Binary);
+	/** An EVENT frame -> the event (name, script, arguments and tensors). */
+	PYTHONCLI_API FPythonEventData ParseEvent(const TSharedPtr<class FJsonObject>& Header, TConstArrayView<uint8> Binary);
+	/** A script's print/log message into LogPythonCLI, one line at a time: "[python <Script>] ...". Level:
+	 info, warning or error. */
+	PYTHONCLI_API void LogScriptMessage(const FString& Script, const FString& Level, const FString& Message);
 }

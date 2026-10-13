@@ -43,6 +43,28 @@ def _protect_stdio():
     return writer
 
 
+def _site_dir_as_platlib(site_dir):
+    """We run the base interpreter with the venv's site-packages added (no venv activation), so sysconfig's
+    platlib/purelib still name the interpreter's own site-packages. Packages that find their files through
+    them, like triton-windows (its bundled compiler and CUDA headers), would look in the wrong place: make
+    them name the site dir, as in a venv."""
+    import sysconfig
+    get_paths, get_path = sysconfig.get_paths, sysconfig.get_path
+
+    def paths(scheme=None, vars=None, expand=True):
+        p = get_paths(scheme, vars, expand) if scheme else get_paths(vars=vars, expand=expand)
+        if scheme is None and vars is None and expand:
+            p["platlib"] = p["purelib"] = site_dir
+        return p
+
+    def path(name, scheme=None, vars=None, expand=True):
+        if name in ("platlib", "purelib") and scheme is None and vars is None and expand:
+            return site_dir
+        return get_path(name, scheme, vars, expand) if scheme else get_path(name, vars=vars, expand=expand)
+
+    sysconfig.get_paths, sysconfig.get_path = paths, path
+
+
 def _exit_with_parent():
     if sys.platform.startswith("linux"):
         try:
@@ -64,9 +86,11 @@ def main():
 
     os.environ.update({k: str(v) for k, v in config.get("env", {}).items()})
     import site
-    for d in config.get("site_dirs", []):
-        if os.path.isdir(d):
-            site.addsitedir(d)
+    site_dirs = [d for d in config.get("site_dirs", []) if os.path.isdir(d)]
+    for d in site_dirs:
+        site.addsitedir(d)
+    if site_dirs:
+        _site_dir_as_platlib(site_dirs[0])
     for d in config.get("script_dirs", []):  # other plugins' script folders (FPythonEnvironment::RegisterScriptDirectory)
         if os.path.isdir(d) and d not in sys.path:
             sys.path.append(d)

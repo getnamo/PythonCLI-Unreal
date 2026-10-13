@@ -1,6 +1,7 @@
 """Script host: loads scripts for each Unreal owner, runs each on its own ordered worker thread, and routes
 frames between them and Unreal. One host per Python process; a shared process hosts many owners.
 """
+import concurrent.futures
 import importlib.util
 import os
 import queue
@@ -16,6 +17,73 @@ from . import _values
 
 _tls = threading.local()
 _host = None  # the running Host (set by Host.__init__)
+
+
+class Deferred:
+    """The reply to one call, sent later and from any thread: resolve(value) or reject(error). Created by
+    ue.defer() inside a call's handler; the handler's own return value is then ignored. Replies to deferred
+    calls may arrive in Unreal in any order."""
+
+    __slots__ = ("_host", "_owner", "_script", "_id", "_lock", "_done")
+
+    def __init__(self, host, owner, script, call_id):
+        self._host, self._owner, self._script, self._id = host, owner, script, call_id
+        self._lock = threading.Lock()
+        self._done = False
+
+    @property
+    def done(self):
+        return self._done
+
+    def _claim(self):
+        with self._lock:
+            if self._done:
+                return False
+            self._done = True
+            return True
+
+    def resolve(self, value=None):
+        """Send the call's result. Only the first resolve/reject counts (later ones return False)."""
+        if not self._claim():
+            return False
+        self._host.reply(self._owner, self._script, self._id, ok=True, result=value)
+        return True
+
+    def reject(self, error, traceback=None):
+        """Fail the call: error is a message or an exception."""
+        if not self._claim():
+            return False
+        if isinstance(error, BaseException):
+            error = f"{type(error).__name__}: {error}"
+        self._host.reply(self._owner, self._script, self._id, ok=False, error=str(error), traceback=traceback)
+        return True
+
+    def __repr__(self):
+        return f"Deferred(call={self._id}, done={self._done})"
+
+
+def defer():
+    """The reply of the call being handled on this thread, to send later (see Deferred). Raises outside a
+    call (events have no reply)."""
+    call = getattr(_tls, "call", None)
+    if call is None:
+        raise RuntimeError("ue.defer() works inside a call's handler (CallFunction / Run), on the thread that handles it")
+    if call[4] is None:
+        call[4] = Deferred(*call[:4])
+    return call[4]
+
+
+def _bind_future(deferred, future):
+    def done(f):
+        if f.cancelled():
+            deferred.reject("cancelled")
+            return
+        e = f.exception()
+        if e is not None:
+            deferred.reject(e, "".join(traceback.format_exception(e)))
+        else:
+            deferred.resolve(f.result())
+    future.add_done_callback(done)
 
 
 def current_context():
@@ -46,6 +114,9 @@ class ScriptContext:
         self.stream_handlers = {}  # stream name -> [fn(frame)]
         self.readers = {}  # stream name -> StreamReader (ue.stream iterators)
         self.ml = None  # ml.Adapter, created by the first _ml_* call (UPythonMLComponent)
+        self.job_specs = {}  # name -> jobs._JobSpec (@ue.job)
+        self.running_jobs = {}  # id -> jobs.Job
+        self.jobs = None  # jobs.Adapter, created by the first _job_* call
         self.module = None
         self.queue = queue.SimpleQueue()
         self.stopping = threading.Event()
@@ -101,6 +172,9 @@ class ScriptContext:
         training = self.ml.training if self.ml is not None else None
         if training is not None and training.is_alive():
             training.join(10)  # should_stop is already true: let fit() finish its batch first
+        if self.running_jobs:
+            from . import jobs
+            jobs.stop_all(self)
         hook = getattr(self.module, "on_stop", None) or getattr(self.module, "dispose", None)
         if callable(hook):
             try:
@@ -109,6 +183,7 @@ class ScriptContext:
                 self.host.log("error", f"{self.script} on_stop failed:\n{traceback.format_exc()}", self)
         self.handlers.clear()
         self.stream_handlers.clear()
+        self.job_specs.clear()
         for reader in list(self.readers.values()):
             reader.drain()
         sys.modules.pop(self.module_name, None)
@@ -140,6 +215,12 @@ class ScriptContext:
                 self.ml = ml.Adapter(self)
             fn = getattr(self.ml, name, None)
             return fn if callable(fn) else None
+        if name.startswith("_job_"):  # the job protocol (unreal_bridge.jobs; UPythonService::StartJob)
+            if self.jobs is None:
+                from . import jobs
+                self.jobs = jobs.Adapter(self)
+            fn = getattr(self.jobs, name, None)
+            return fn if callable(fn) else None
         handlers = self.handlers.get(name)
         if handlers:
             return handlers[0]
@@ -162,12 +243,25 @@ class ScriptContext:
         if fn is None:
             self.host.reply(self.owner, self.script, call_id, ok=False, error=f"{self.script} has no function or handler '{name}'")
             return
+        call = _tls.call = [self.host, self.owner, self.script, call_id, None]  # [4]: the Deferred, once ue.defer() made it
         try:
             result = fn(*args)
         except Exception as e:  # noqa: BLE001
             tb = traceback.format_exc()
             self.host.log("error", f"{self.script}: call '{name}' failed:\n{tb}", self)
-            self.host.reply(self.owner, self.script, call_id, ok=False, error=f"{type(e).__name__}: {e}", traceback=tb)
+            if call[4] is None:
+                self.host.reply(self.owner, self.script, call_id, ok=False, error=f"{type(e).__name__}: {e}", traceback=tb)
+            else:
+                call[4].reject(e, tb)  # no-op if it was already answered
+            return
+        finally:
+            _tls.call = None
+        if call[4] is not None:
+            return  # deferred: whoever holds it replies
+        if isinstance(result, Deferred):
+            return
+        if isinstance(result, concurrent.futures.Future):
+            _bind_future(Deferred(self.host, self.owner, self.script, call_id), result)
             return
         self.host.reply(self.owner, self.script, call_id, ok=True, result=result)
 
@@ -184,16 +278,23 @@ class ScriptContext:
                 reader.put(frame)
                 frame = None  # the iterator releases it
                 return
-            handlers = list(self.stream_handlers.get(stream.name, ()))
+            handlers = list(self.stream_handlers.get(stream.name, ()) or self.stream_handlers.get(stream.info.get("name"), ()))
+            if not handlers and stream.info.get("call"):  # a stream bound to a function (service streams)
+                fn = self.find_callable(stream.info["call"])
+                handlers = [fn] if fn else []
             if not handlers:
                 if frame._sid is not None:
-                    frame.fail(f"{self.script} has no @ue.on_stream('{stream.name}') handler")
+                    frame.fail(f"{self.script} has no @ue.on_stream('{stream.info.get('name') or stream.name}') handler"
+                               + (f" or function '{stream.info['call']}'" if stream.info.get("call") else ""))
                 return
             result = None
             for i, h in enumerate(handlers):
                 r = h(frame)
                 if i == 0:
                     result = r
+            if frame._deferred:
+                frame = None  # its holder replies / releases it (frame.defer())
+                return
             if frame._sid is not None:
                 frame.reply(result)
         except Exception as e:  # noqa: BLE001

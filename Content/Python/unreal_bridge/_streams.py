@@ -92,7 +92,7 @@ class StreamFrame:
     """
 
     __slots__ = ("stream", "seq", "time", "frame", "slot", "dtype", "shape", "layout", "meta", "array",
-                 "_host", "_sid", "_released", "_replied")
+                 "_host", "_sid", "_released", "_replied", "_deferred")
 
     def __init__(self, host, stream, header, binary):
         self._host = host
@@ -108,6 +108,7 @@ class StreamFrame:
         self._sid = header.get("sid")
         self._released = False
         self._replied = False
+        self._deferred = False
         nbytes = int(header.get("nbytes", 0))
         if stream.region is not None:
             off = self.slot * stream.slot_bytes
@@ -152,6 +153,13 @@ class StreamFrame:
             width = len(names) or 1
             values = [values[i:i + width] for i in range(0, len(values), width)]
         return [dict(zip(names, row)) for row in values]
+
+    def defer(self):
+        """Keep the frame after the handler returns: its slot stays Python's, and a Lockstep step stays
+        unanswered, until reply() / release() is called (from any thread). How a Gymnasium env answers a
+        step from its training loop."""
+        self._deferred = True
+        return self
 
     def reply(self, value):
         """Lockstep frames: send the step's result (handlers can just return it instead). This also releases

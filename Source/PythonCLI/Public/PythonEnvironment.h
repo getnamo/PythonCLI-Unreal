@@ -3,6 +3,8 @@
 #include "CoreMinimal.h"
 #include "PythonEnvironment.generated.h"
 
+struct FPythonScriptParams;
+
 UENUM(BlueprintType)
 enum class EPythonEnvironmentState : uint8
 {
@@ -39,6 +41,19 @@ public:
 	static void RegisterScriptDirectory(const FString& Directory);
 	static TArray<FString> GetScriptDirectories();
 
+	/** Requirements for packaged builds instead of the editor's (e.g. CPU torch while the editor has CUDA).
+	 Once a plugin registers one (or Project Settings > Python CLI > Override Packaged Requirements is on),
+	 Bundle and Install On First Run install these plus the setting's Packaged Requirements, and not the
+	 editor's requirements. */
+	static void RegisterPackagedRequirementsFile(const FString& FilePath);
+	static void UnregisterPackagedRequirementsFile(const FString& FilePath);
+	/** The uv --torch-backend for packaged builds when the Packaged Torch Backend setting is empty. */
+	static void SetDefaultPackagedTorchBackend(const FString& Backend);
+
+	/** The script file for these params: the project's ScriptRoot, then registered script folders, then
+	 PythonCLI's Content/Python. "name" also finds name.py. */
+	static FString ResolveScriptPath(const FPythonScriptParams& Params);
+
 	/** Create/update the venv if requirements changed (no-op when up to date), then call OnDone. Once Ready,
 	 it doesn't look again unless bRecheck (e.g. after the requirements settings changed). */
 	void EnsureReady(TFunction<void(bool bReady, const FString& Error)> OnDone = nullptr, bool bForceReinstall = false, bool bRecheck = false);
@@ -64,12 +79,21 @@ public:
 	static bool IsPackagedBuild();
 	/** The file the requirements are combined into for uv. */
 	FString RequirementsPath() const;
+	/** Packaged-build requirements (and their uv arguments), written by the editor's setup when an override is
+	 active; PythonCLI.Build.cs bundles from them. Intermediate/PythonCLI/requirements-packaged.txt / -args.txt. */
+	static FString PackagedRequirementsPath();
+	static FString PackagedArgsPath();
 
 	/** Linux: archives made on Windows can lose the execute bit. */
 	static void EnsureExecutable(const FString& Path);
 
 private:
 	bool RunSetup(bool bForceReinstall, FString& OutError);
+	/** The requirements text (and uv arguments) packaged builds install instead of the editor's; false if no
+	 override is active. */
+	static bool PackagedOverride(FString& OutRequirements, FString& OutArgs);
+	/** Editor: write (or remove) the packaged override files for PythonCLI.Build.cs. */
+	static void WritePackagedOverride();
 	/** Runs a tool with output streamed to the log; returns its exit code (-1 if it couldn't start). */
 	int32 RunTool(const FString& Exe, const FString& Args, const FString& WorkingDir);
 	void Finish(bool bOk, const FString& Error);

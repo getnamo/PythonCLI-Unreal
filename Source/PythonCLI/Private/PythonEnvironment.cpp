@@ -1,6 +1,7 @@
 #include "PythonEnvironment.h"
 #include "PythonCLI.h"
 #include "PythonCLISettings.h"
+#include "PythonTypes.h"
 #include "Async/Async.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
@@ -23,6 +24,8 @@ namespace PythonEnvironmentPrivate
 	static TArray<FString> RegisteredFiles;
 	static TArray<FString> RegisteredScriptDirs;
 	static TMap<FString, FString> RegisteredEnv;
+	static TArray<FString> RegisteredPackagedFiles;
+	static FString DefaultPackagedTorchBackend;
 
 	static FString Quote(const FString& S)
 	{
@@ -86,6 +89,112 @@ TArray<FString> FPythonEnvironment::GetScriptDirectories()
 {
 	FScopeLock L(&PythonEnvironmentPrivate::RegisteredLock);
 	return PythonEnvironmentPrivate::RegisteredScriptDirs;
+}
+
+void FPythonEnvironment::RegisterPackagedRequirementsFile(const FString& FilePath)
+{
+	FScopeLock L(&PythonEnvironmentPrivate::RegisteredLock);
+	PythonEnvironmentPrivate::RegisteredPackagedFiles.AddUnique(FPaths::ConvertRelativePathToFull(FilePath));
+}
+
+void FPythonEnvironment::UnregisterPackagedRequirementsFile(const FString& FilePath)
+{
+	FScopeLock L(&PythonEnvironmentPrivate::RegisteredLock);
+	PythonEnvironmentPrivate::RegisteredPackagedFiles.Remove(FPaths::ConvertRelativePathToFull(FilePath));
+}
+
+void FPythonEnvironment::SetDefaultPackagedTorchBackend(const FString& Backend)
+{
+	FScopeLock L(&PythonEnvironmentPrivate::RegisteredLock);
+	PythonEnvironmentPrivate::DefaultPackagedTorchBackend = Backend;
+}
+
+FString FPythonEnvironment::ResolveScriptPath(const FPythonScriptParams& Params)
+{
+	//The project's scripts first, then folders other plugins registered, then this plugin's Content/Python.
+	//"my_model" also finds my_model.py (TensorFlow-Unreal 1.x named modules without the extension).
+	TArray<FString> Roots = { FPaths::ProjectDir() / Params.ScriptRoot };
+	Roots.Append(GetScriptDirectories());
+	Roots.Add(PluginPythonDir());
+	const bool bNoExtension = FPaths::GetExtension(Params.Script).IsEmpty();
+	for (const FString& Root : Roots)
+	{
+		const FString Path = FPaths::ConvertRelativePathToFull(Root / Params.Script);
+		if (FPaths::FileExists(Path))
+		{
+			return Path;
+		}
+		if (bNoExtension && FPaths::FileExists(Path + TEXT(".py")))
+		{
+			return Path + TEXT(".py");
+		}
+	}
+	return FPaths::ConvertRelativePathToFull(Roots[0] / Params.Script);
+}
+
+FString FPythonEnvironment::PackagedRequirementsPath()
+{
+	return FPaths::ConvertRelativePathToFull(FPaths::ProjectIntermediateDir() / TEXT("PythonCLI/requirements-packaged.txt"));
+}
+
+FString FPythonEnvironment::PackagedArgsPath()
+{
+	return FPaths::ConvertRelativePathToFull(FPaths::ProjectIntermediateDir() / TEXT("PythonCLI/requirements-packaged-args.txt"));
+}
+
+bool FPythonEnvironment::PackagedOverride(FString& OutRequirements, FString& OutArgs)
+{
+	using namespace PythonEnvironmentPrivate;
+	const UPythonCLISettings* Settings = GetDefault<UPythonCLISettings>();
+	TArray<FString> Files;
+	FString Backend;
+	{
+		FScopeLock L(&RegisteredLock);
+		Files = RegisteredPackagedFiles;
+		Backend = DefaultPackagedTorchBackend;
+	}
+	OutRequirements.Reset();
+	OutArgs.Reset();
+	if (!Settings->bOverridePackagedRequirements && Files.Num() == 0)
+	{
+		return false;
+	}
+	for (const FString& Line : Settings->PackagedRequirements)
+	{
+		const FString Trimmed = Line.TrimStartAndEnd();
+		if (!Trimmed.IsEmpty())
+		{
+			OutRequirements += Trimmed + TEXT("\n");
+		}
+	}
+	for (const FString& File : Files)
+	{
+		OutRequirements += TEXT("-r ") + Quote(File) + TEXT("\n");
+	}
+	if (!Settings->PackagedTorchBackend.IsEmpty())
+	{
+		Backend = Settings->PackagedTorchBackend;
+	}
+	if (!Backend.IsEmpty())
+	{
+		OutArgs = TEXT("--torch-backend ") + Backend;
+	}
+	return true;
+}
+
+void FPythonEnvironment::WritePackagedOverride()
+{
+	FString Requirements, Args;
+	if (PackagedOverride(Requirements, Args))
+	{
+		FFileHelper::SaveStringToFile(Requirements, *PackagedRequirementsPath(), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+		FFileHelper::SaveStringToFile(Args, *PackagedArgsPath(), FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
+	}
+	else
+	{
+		IFileManager::Get().Delete(*PackagedRequirementsPath(), false, false, true);
+		IFileManager::Get().Delete(*PackagedArgsPath(), false, false, true);
+	}
 }
 
 FString FPythonEnvironment::PluginDir()
@@ -297,24 +406,39 @@ bool FPythonEnvironment::RunSetup(bool bForceReinstall, FString& OutError)
 	}
 	EnsureExecutable(Interpreter);
 	EnsureExecutable(Uv);
+	if (!IsPackagedBuild())
+	{
+		WritePackagedOverride(); //What PythonCLI.Build.cs bundles, if packaged builds get other requirements
+	}
 
-	// Requirements: settings + files registered by plugins + the project's scripts requirements.txt
+	// Requirements: settings + files registered by plugins + the project's scripts requirements.txt. Packaged
+	// builds with an override install the packaged requirements instead.
 	FString Requirements;
 	FString HashInput = BundledRuntimeVersion() + TEXT("\n");
-	for (const FString& Line : Settings->Requirements)
-	{
-		const FString Trimmed = Line.TrimStartAndEnd();
-		if (!Trimmed.IsEmpty())
-		{
-			Requirements += Trimmed + LINE_TERMINATOR;
-		}
-	}
+	FString PackagedRequirements, PackagedArgs;
+	const bool bPackagedOverride = IsPackagedBuild() && PackagedOverride(PackagedRequirements, PackagedArgs);
 	TArray<FString> Files;
+	if (bPackagedOverride)
 	{
-		FScopeLock L(&RegisteredLock);
-		Files = RegisteredFiles;
+		Requirements = PackagedRequirements;
+		HashInput += PackagedRequirements;
 	}
-	Files.Add(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Content/Scripts/requirements.txt")));
+	else
+	{
+		for (const FString& Line : Settings->Requirements)
+		{
+			const FString Trimmed = Line.TrimStartAndEnd();
+			if (!Trimmed.IsEmpty())
+			{
+				Requirements += Trimmed + LINE_TERMINATOR;
+			}
+		}
+		{
+			FScopeLock L(&RegisteredLock);
+			Files = RegisteredFiles;
+		}
+		Files.Add(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Content/Scripts/requirements.txt")));
+	}
 	for (const FString& File : Files)
 	{
 		FString Contents;
@@ -333,7 +457,11 @@ bool FPythonEnvironment::RunSetup(bool bForceReinstall, FString& OutError)
 	{
 		IndexArgs += TEXT(" --extra-index-url ") + Quote(Url);
 	}
-	if (!Settings->TorchBackend.IsEmpty())
+	if (bPackagedOverride)
+	{
+		IndexArgs += PackagedArgs.IsEmpty() ? FString() : TEXT(" ") + PackagedArgs;
+	}
+	else if (!Settings->TorchBackend.IsEmpty())
 	{
 		IndexArgs += TEXT(" --torch-backend ") + Settings->TorchBackend;
 	}

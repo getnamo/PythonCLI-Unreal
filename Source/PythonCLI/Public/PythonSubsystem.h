@@ -3,6 +3,7 @@
 #include "CoreMinimal.h"
 #include "Subsystems/EngineSubsystem.h"
 #include "PythonEnvironment.h"
+#include "PythonService.h"
 #include "PythonSubsystem.generated.h"
 
 class FPythonProcess;
@@ -32,6 +33,20 @@ public:
 	/** A new process just for one owner (bUseSharedProcess off). Started; stop it when done. */
 	TSharedPtr<FPythonProcess, ESPMode::ThreadSafe> CreateDedicatedProcess(const FString& Name);
 
+	/** The service with this name, created (and its script started) on first use. Script: a path under
+	 Content/Scripts (or a registered script folder, or PythonCLI's Content/Python). Asking again with the
+	 same name returns the same service. */
+	UFUNCTION(BlueprintCallable, Category = "Python CLI", meta = (AutoCreateRefTerm = "Args"))
+	UPythonService* GetService(const FString& Name, const FString& Script, EPythonServiceProcess Process, const TArray<FString>& Args, bool bStart = true);
+
+	/** The service with this name, or null. */
+	UFUNCTION(BlueprintPure, Category = "Python CLI")
+	UPythonService* FindService(const FString& Name) const;
+
+	/** Stop a service's script (and its dedicated process) and forget it. */
+	UFUNCTION(BlueprintCallable, Category = "Python CLI")
+	void StopService(const FString& Name);
+
 	/** Bring the venv in line with the requirements now (normally automatic: at startup, and when the
 	 requirement settings change in the editor). bForceReinstall reinstalls every requirement. */
 	UFUNCTION(BlueprintCallable, Category = "Python CLI")
@@ -53,4 +68,7 @@ public:
 private:
 	TSharedPtr<FPythonEnvironment, ESPMode::ThreadSafe> Environment;
 	TSharedPtr<FPythonProcess, ESPMode::ThreadSafe> SharedProcess;
+
+	UPROPERTY()
+	TMap<FString, TObjectPtr<UPythonService>> Services;
 };

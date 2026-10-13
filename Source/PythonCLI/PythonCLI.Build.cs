@@ -30,6 +30,7 @@ public class PythonCLI : ModuleRules
 			"Projects",
 			"RenderCore",
 			"RHI",
+			"ImageCore",
 			"AudioCaptureCore",
 		});
 
@@ -87,6 +88,7 @@ public class PythonCLI : ModuleRules
 	/// Installs the packages the editor's environment uses (Intermediate/PythonCLI/requirements.txt, written by
 	/// its last setup) for the target platform with uv (cross-platform: --python-platform), into
 	/// Intermediate/PythonCLI/packaged/<Platform>/site-packages, and stages them from there (same path in the build).
+	/// With a packaged override (requirements-packaged.txt, also written by the editor's setup), those instead.
 	/// Reinstalls only when the requirements (or the interpreter) change.
 	void StageBundledPackages(ReadOnlyTargetRules Target, string PluginDir, string ProjectDir, string PlatformDir)
 	{
@@ -95,6 +97,14 @@ public class PythonCLI : ModuleRules
 			: Path.Combine(PluginDir, "ThirdParty", "python", "Linux", "bin", "python3.12");
 		string Uv = Path.Combine(PluginDir, "ThirdParty", "uv", HostDir, HostDir == "Win64" ? "uv.exe" : "uv");
 		string Requirements = Path.Combine(ProjectDir, "Intermediate", "PythonCLI", "requirements.txt");
+		string PackagedRequirements = Path.Combine(ProjectDir, "Intermediate", "PythonCLI", "requirements-packaged.txt");
+		string PackagedArgs = Path.Combine(ProjectDir, "Intermediate", "PythonCLI", "requirements-packaged-args.txt");
+		bool bOverride = File.Exists(PackagedRequirements);
+		if (bOverride)
+		{
+			Requirements = PackagedRequirements;
+			Logger.LogInformation("PythonCLI: bundling the packaged requirements override ({File})", PackagedRequirements);
+		}
 		string OutDir = Path.Combine(ProjectDir, "Intermediate", "PythonCLI", "packaged", PlatformDir);
 		string SiteDir = Path.Combine(OutDir, "site-packages");
 		string Marker = Path.Combine(OutDir, "pythoncli-packaged.txt");
@@ -122,7 +132,15 @@ public class PythonCLI : ModuleRules
 			IndexArgs.Add("--extra-index-url \"" + Url + "\"");
 		}
 		string TorchBackend = ReadSetting(Target, "TorchBackend", "");
-		if (TorchBackend.Length > 0)
+		if (bOverride)
+		{
+			string Extra = File.Exists(PackagedArgs) ? File.ReadAllText(PackagedArgs).Trim() : "";
+			if (Extra.Length > 0)
+			{
+				IndexArgs.Add(Extra);
+			}
+		}
+		else if (TorchBackend.Length > 0)
 		{
 			IndexArgs.Add("--torch-backend " + TorchBackend);
 		}
