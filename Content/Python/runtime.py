@@ -67,6 +67,9 @@ def main():
     for d in config.get("site_dirs", []):
         if os.path.isdir(d):
             site.addsitedir(d)
+    for d in config.get("script_dirs", []):  # other plugins' script folders (FPythonEnvironment::RegisterScriptDirectory)
+        if os.path.isdir(d) and d not in sys.path:
+            sys.path.append(d)
 
     from unreal_bridge import _host, _values
     host = _host.Host(writer, config)

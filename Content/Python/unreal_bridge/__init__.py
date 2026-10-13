@@ -27,10 +27,11 @@ from . import _streams
 from ._host import current_context as _ctx
 from ._streams import StreamFrame
 from ._values import Tensor, numpy_version
+from .ml import MLPluginAPI, TFPluginAPI
 
 __all__ = ["on", "on_stream", "stream", "emit", "log", "warning", "error", "args", "should_stop", "stopping",
            "run_in_background", "script_path", "script_dir", "project_dir", "content_dir", "owner", "Tensor",
-           "StreamFrame", "numpy_version"]
+           "StreamFrame", "numpy_version", "content_path", "MLPluginAPI", "TFPluginAPI", "keras"]
 
 
 def _require():
@@ -97,6 +98,11 @@ def should_stop():
     return ctx is not None and ctx.stopping.is_set()
 
 
+def content_path(*parts):
+    """A path under the project's Content directory, e.g. ue.content_path("Models", "mnist.keras")."""
+    return os.path.join(_h._host.config.get("content_dir", ""), *parts)
+
+
 def run_in_background(fn, *args, **kwargs):
     """Run fn on a new thread that belongs to this script (emit/log work from it; check should_stop())."""
     return _require().run_in_background(fn, *args, **kwargs)
@@ -116,4 +122,7 @@ def __getattr__(name):
         return os.path.dirname(_require().path)
     if name in ("project_dir", "content_dir"):
         return _h._host.config.get(name, "")
+    if name == "keras":  # ue.keras.StopOnRequest / ProgressEvents; imports Keras only when used
+        import importlib
+        return importlib.import_module(".keras", __name__)
     raise AttributeError(f"module 'unreal_bridge' has no attribute '{name}'")

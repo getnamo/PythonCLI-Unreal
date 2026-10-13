@@ -30,13 +30,25 @@ TSharedPtr<FPythonProcess, ESPMode::ThreadSafe> UPythonComponent::GetProcess()
 
 FString UPythonComponent::ResolveScriptPath() const
 {
-	const FString InProject = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / ScriptParams.ScriptRoot / ScriptParams.Script);
-	if (FPaths::FileExists(InProject))
+	//The project's scripts first, then folders other plugins registered, then this plugin's Content/Python.
+	//"my_model" also finds my_model.py (TensorFlow-Unreal 1.x named modules without the extension).
+	TArray<FString> Roots = { FPaths::ProjectDir() / ScriptParams.ScriptRoot };
+	Roots.Append(FPythonEnvironment::GetScriptDirectories());
+	Roots.Add(FPythonEnvironment::PluginPythonDir());
+	const bool bNoExtension = FPaths::GetExtension(ScriptParams.Script).IsEmpty();
+	for (const FString& Root : Roots)
 	{
-		return InProject;
+		const FString Path = FPaths::ConvertRelativePathToFull(Root / ScriptParams.Script);
+		if (FPaths::FileExists(Path))
+		{
+			return Path;
+		}
+		if (bNoExtension && FPaths::FileExists(Path + TEXT(".py")))
+		{
+			return Path + TEXT(".py");
+		}
 	}
-	const FString InPlugin = FPaths::ConvertRelativePathToFull(FPythonEnvironment::PluginPythonDir() / ScriptParams.Script);
-	return FPaths::FileExists(InPlugin) ? InPlugin : InProject;
+	return FPaths::ConvertRelativePathToFull(Roots[0] / ScriptParams.Script);
 }
 
 void UPythonComponent::BeginPlay()
@@ -258,12 +270,14 @@ void UPythonComponent::HandleFrame(const FPythonFrame& Frame)
 		{
 			bScriptStarting = false;
 			bScriptRunning = true;
+			HandleScriptStarted(Script);
 			OnScriptStarted.Broadcast(Script);
 		}
 		else if (Status == TEXT("stopped"))
 		{
 			//A reload reports the old instance stopped, then the new one started
 			bScriptRunning = false;
+			HandleScriptStopped(Script);
 			if (!bScriptStarting)
 			{
 				OnScriptStopped.Broadcast(Script);
@@ -311,6 +325,10 @@ void UPythonComponent::HandleFrame(const FPythonFrame& Frame)
 		}
 		Data.JsonArgs = PythonWire::ToJsonString(Data.Args);
 		Data.Tensors = PythonWire::UnpackTensors(Args, Frame.Binary);
+		if (HandleScriptEvent(Data))
+		{
+			return;
+		}
 		if (TFunction<void(const FPythonEventData&)>* Native = NativeHandlers.Find(Data.Name))
 		{
 			(*Native)(Data);

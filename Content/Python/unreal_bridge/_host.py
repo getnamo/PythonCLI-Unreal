@@ -45,6 +45,7 @@ class ScriptContext:
         self.handlers = {}
         self.stream_handlers = {}  # stream name -> [fn(frame)]
         self.readers = {}  # stream name -> StreamReader (ue.stream iterators)
+        self.ml = None  # ml.Adapter, created by the first _ml_* call (UPythonMLComponent)
         self.module = None
         self.queue = queue.SimpleQueue()
         self.stopping = threading.Event()
@@ -97,6 +98,9 @@ class ScriptContext:
         return True
 
     def _unload(self):
+        training = self.ml.training if self.ml is not None else None
+        if training is not None and training.is_alive():
+            training.join(10)  # should_stop is already true: let fit() finish its batch first
         hook = getattr(self.module, "on_stop", None) or getattr(self.module, "dispose", None)
         if callable(hook):
             try:
@@ -130,6 +134,12 @@ class ScriptContext:
 
     # -- dispatch (worker thread) --------------------------------------------------------------------
     def find_callable(self, name):
+        if name.startswith("_ml_"):  # the ML component's calls (unreal_bridge.ml)
+            if self.ml is None:
+                from . import ml
+                self.ml = ml.Adapter(self)
+            fn = getattr(self.ml, name, None)
+            return fn if callable(fn) else None
         handlers = self.handlers.get(name)
         if handlers:
             return handlers[0]

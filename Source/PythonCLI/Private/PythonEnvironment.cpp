@@ -21,6 +21,8 @@ namespace PythonEnvironmentPrivate
 {
 	static FCriticalSection RegisteredLock;
 	static TArray<FString> RegisteredFiles;
+	static TArray<FString> RegisteredScriptDirs;
+	static TMap<FString, FString> RegisteredEnv;
 
 	static FString Quote(const FString& S)
 	{
@@ -47,6 +49,43 @@ void FPythonEnvironment::RegisterRequirementsFile(const FString& FilePath)
 {
 	FScopeLock L(&PythonEnvironmentPrivate::RegisteredLock);
 	PythonEnvironmentPrivate::RegisteredFiles.AddUnique(FPaths::ConvertRelativePathToFull(FilePath));
+}
+
+void FPythonEnvironment::UnregisterRequirementsFile(const FString& FilePath)
+{
+	FScopeLock L(&PythonEnvironmentPrivate::RegisteredLock);
+	PythonEnvironmentPrivate::RegisteredFiles.Remove(FPaths::ConvertRelativePathToFull(FilePath));
+}
+
+void FPythonEnvironment::RegisterEnvironmentVariable(const FString& Name, const FString& Value)
+{
+	FScopeLock L(&PythonEnvironmentPrivate::RegisteredLock);
+	if (Value.IsEmpty())
+	{
+		PythonEnvironmentPrivate::RegisteredEnv.Remove(Name);
+	}
+	else
+	{
+		PythonEnvironmentPrivate::RegisteredEnv.Add(Name, Value);
+	}
+}
+
+TMap<FString, FString> FPythonEnvironment::GetEnvironmentVariables()
+{
+	FScopeLock L(&PythonEnvironmentPrivate::RegisteredLock);
+	return PythonEnvironmentPrivate::RegisteredEnv;
+}
+
+void FPythonEnvironment::RegisterScriptDirectory(const FString& Directory)
+{
+	FScopeLock L(&PythonEnvironmentPrivate::RegisteredLock);
+	PythonEnvironmentPrivate::RegisteredScriptDirs.AddUnique(FPaths::ConvertRelativePathToFull(Directory));
+}
+
+TArray<FString> FPythonEnvironment::GetScriptDirectories()
+{
+	FScopeLock L(&PythonEnvironmentPrivate::RegisteredLock);
+	return PythonEnvironmentPrivate::RegisteredScriptDirs;
 }
 
 FString FPythonEnvironment::PluginDir()

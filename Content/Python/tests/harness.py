@@ -22,6 +22,8 @@ from unreal_bridge import _frames as F  # noqa: E402
 FIXTURE = os.path.join(HERE, "scripts", "fixture.py")
 BROKEN = os.path.join(HERE, "scripts", "broken.py")
 STREAMS = os.path.join(HERE, "scripts", "streams.py")
+ML_FIXTURE = os.path.join(HERE, "scripts", "ml_fixture.py")
+ML_LEGACY = os.path.join(HERE, "scripts", "ml_legacy.py")
 results = []
 
 
@@ -211,6 +213,98 @@ class Producer:
 
 def floats(values):
     return struct.pack(f"<{len(values)}f", *values)
+
+
+def ml_tests(b):
+    S = "ml_fixture.py"
+    b.control(cmd="start", owner="m1", script=S, path=ML_FIXTURE)
+    check("ml fixture started", b.status("started", "m1", S) is not None)
+    r = b.call("m1", S, "_ml_json_input", [{"a": 2, "b": 3}])
+    check("json input runs on_setup first, then on_json_input", r is not None and r[1]["ok"] and r[1]["result"] == {"sum": 5, "setups": 1}, r and r[1])
+    r = b.call("m1", S, "_ml_setup", [])
+    r2 = b.call("m1", S, "_ml_custom", ["state"])
+    check("setup runs once", r is not None and r[1]["ok"] and r2 is not None and r2[1]["result"]["setups"] == 1, (r and r[1], r2 and r2[1]))
+    r = b.call("m1", S, "_ml_float_input", [{"_tensor": 0, "dtype": "float32", "shape": [3]}], [floats([1, 2, 3])])
+    check("float array input gets a list", r is not None and r[1]["ok"] and r[1]["result"] == [2.0, 4.0, 6.0], r and r[1])
+    r = b.call("m1", S, "_ml_tensor_input", [{"_tensor": 0, "dtype": "float32", "shape": [2, 2]}], [floats([1, 2, 3, 6])])
+    check("tensor input", r is not None and r[1]["ok"] and r[1]["result"] == {"mean": 3.0, "shape": [2, 2]}, r and r[1])
+    r = b.call("m1", S, "_ml_custom", ["scale", 4, 3])
+    check("custom function", r is not None and r[1]["ok"] and r[1]["result"] == 12, r and r[1])
+    r = b.call("m1", S, "_ml_json_input", [{"a": 1, "b": 1}, "scale"])
+    check("input routed to a named function errors cleanly on bad args", r is not None and not r[1]["ok"] and "TypeError" in r[1]["error"], r and r[1])
+    r = b.call("m1", S, "_ml_custom", ["nope"])
+    check("missing custom function is an error reply", r is not None and not r[1]["ok"] and "no function 'nope'" in r[1]["error"], r and r[1])
+
+    # training: progress and custom events arrive, StopTraining ends it early
+    b.clear()
+    r = b.call("m1", S, "_ml_begin_training", [])
+    check("begin training returns at once", r is not None and r[1]["result"] == {"started": True}, r and r[1])
+    prog = b.ev("_ml_progress", "m1")
+    check("progress events", prog is not None and prog[1]["args"][0]["step"] == 0, prog and prog[1])
+    ev = b.ev("_ml_event", "m1")
+    note = b.wait(lambda t, h, x: t == F.EVENT and h.get("name") == "_ml_event" and h["args"][0] == "note")
+    check("call_event reaches Unreal (JSON data and plain strings)", ev is not None and ev[1]["args"] == ["milestone", {"step": 5}]
+          and note is not None and note[1]["args"] == ["note", "plain text"], (ev and ev[1], note and note[1]))
+    r = b.call("m1", S, "_ml_json_input", [{"a": 1, "b": 1}])
+    check("inputs are answered while training runs", r is not None and r[1]["ok"] and r[1]["result"]["sum"] == 2, r and r[1])
+    t0 = time.time()
+    r = b.call("m1", S, "_ml_stop_training", [])
+    done = b.ev("_ml_training_complete", "m1")
+    check("stop training ends it early with stopped=True", r is not None and r[1]["result"]["stopped"] and done is not None
+          and done[1]["args"][1] is True and done[1]["args"][0]["steps"] < 400 and time.time() - t0 < 2, (r and r[1], done and done[1]))
+    check("training summary is sent even with non-JSON values", done is not None and done[1]["args"][0]["model"] == {"weights": [0.5, 0.5]}
+          and isinstance(done[1]["args"][0]["object"], str), done and done[1])
+    r = b.call("m1", S, "_ml_custom", ["state"])
+    check("on_stop_training ran; should_stop stays set until the next training", r is not None and r[1]["result"]["stopped_calls"] == 1 and r[1]["result"]["should_stop"], r and r[1])
+
+    b.clear()
+    b.call("m1", S, "_ml_custom", ["configure", 20])
+    b.call("m1", S, "_ml_begin_training", [])
+    done = b.ev("_ml_training_complete", "m1")
+    check("a new training resets should_stop and runs to the end", done is not None and done[1]["args"] == [{"steps": 20, "model": {"weights": [0.5, 0.5]}, "object": done[1]["args"][0]["object"]}, False], done and done[1])
+
+    b.clear()
+    b.call("m1", S, "_ml_custom", ["configure", 20, True])
+    b.call("m1", S, "_ml_begin_training", [])
+    err = b.ev("_ml_training_error", "m1")
+    check("a training exception arrives with its traceback", err is not None and "training failed on purpose" in err[1]["args"][0] and "Traceback" in err[1]["args"][1], err and err[1])
+
+    # stopping the script stops training too
+    b.clear()
+    b.call("m1", S, "_ml_custom", ["configure", 1000])
+    b.call("m1", S, "_ml_begin_training", [])
+    b.ev("_ml_progress", "m1")
+    t0 = time.time()
+    b.control(cmd="stop", owner="m1", script=S)
+    done = b.ev("_ml_training_complete", "m1")
+    check("script stop ends training (should_stop) before unloading", done is not None and done[1]["args"][1] is True and b.status("stopped", "m1", S) is not None
+          and time.time() - t0 < 3, done and done[1])
+
+    # an old camelCase TFPluginAPI script, unchanged
+    L = "ml_legacy.py"
+    b.clear()
+    b.control(cmd="start", owner="m2", script=L, path=ML_LEGACY)
+    b.status("started", "m2", L)
+    r = b.call("m2", L, "_ml_json_input", [{"a": 5, "b": 2}])
+    log = b.wait(lambda t, h, x: t == F.LOG and "legacy setup" in h.get("msg", ""))
+    check("legacy script: getApi, onSetup, onJsonInput, unreal_engine.log", r is not None and r[1]["ok"] and r[1]["result"] == {"c": 7} and log is not None, (r and r[1], log and log[1]))
+    b.call("m2", L, "_ml_custom", ["changeOperation", "-"])
+    r = b.call("m2", L, "_ml_json_input", [{"a": 5, "b": 2}])
+    check("legacy custom function", r is not None and r[1]["result"] == {"c": 3}, r and r[1])
+    b.call("m2", L, "_ml_begin_training", [])
+    ev = b.ev("_ml_event", "m2")
+    b.call("m2", L, "_ml_stop_training", [])
+    done = b.ev("_ml_training_complete", "m2")
+    check("legacy callEvent and shouldStop", ev is not None and ev[1]["args"] == ["TrainingUpdateEvent", {"i": 2}] and done is not None and done[1]["args"][1] is True,
+          (ev and ev[1], done and done[1]))
+    b.control(cmd="stopOwner", owner="m2")
+
+    # a script without get_api
+    b.control(cmd="start", owner="m3", script="fixture.py", path=FIXTURE)
+    b.status("started", "m3", "fixture.py")
+    r = b.call("m3", "fixture.py", "_ml_json_input", [{}])
+    check("no get_api() is an error reply", r is not None and not r[1]["ok"] and "get_api" in r[1]["error"], r and r[1])
+    b.control(cmd="stopOwner", owner="m3")
 
 
 def stream_tests(b, numpy):
@@ -446,6 +540,9 @@ def main():
 
     # streams
     stream_tests(b, numpy)
+
+    # ML API
+    ml_tests(b)
 
     # exit
     b.clear()

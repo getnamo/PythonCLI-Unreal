@@ -27,6 +27,17 @@ public:
 	/** Requirements files other plugins add to every project's venv (e.g. a framework profile). Call from
 	 a module's StartupModule; changes to the files are picked up on the next setup. */
 	static void RegisterRequirementsFile(const FString& FilePath);
+	static void UnregisterRequirementsFile(const FString& FilePath);
+
+	/** Environment variables other plugins set for every Python process started from now on (e.g.
+	 KERAS_BACKEND). The project's Environment Variables setting overrides them; an empty Value removes one. */
+	static void RegisterEnvironmentVariable(const FString& Name, const FString& Value);
+	static TMap<FString, FString> GetEnvironmentVariables();
+
+	/** Script folders other plugins add (e.g. their bundled examples): components find scripts there after
+	 the project's own, and processes put them on sys.path. Call from a module's StartupModule. */
+	static void RegisterScriptDirectory(const FString& Directory);
+	static TArray<FString> GetScriptDirectories();
 
 	/** Create/update the venv if requirements changed (no-op when up to date), then call OnDone. Once Ready,
 	 it doesn't look again unless bRecheck (e.g. after the requirements settings changed). */

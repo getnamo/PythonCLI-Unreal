@@ -7,7 +7,7 @@ Scripts run **out of process**: e.g. a crash in a native ML library never takes 
 
 It's the base for the [TensorFlow-Unreal](https://github.com/getnamo/TensorFlow-Unreal) 2.0 refactor, and for PyTorch workflows.
 
-Status: **0.2.0 (beta)**. Win64 tested; Linux x86_64 tested for the Python side.
+Status: **0.3.0 (beta)**. Win64 tested; Linux x86_64 tested for the Python side.
 
 | Piece | What it is |
 |---|---|
@@ -112,6 +112,40 @@ def act(frame):
   - Render-target readback: ready about 2 frames after capture.
 - **Example:** `examples/streams.py` handles all four kinds.
 
+## Machine learning
+
+A **Python ML** component (`UPythonMLComponent`) runs scripts written against the ML plugin API. That's the TensorFlow-Unreal / ml-remote-server contract; [TensorFlow-Unreal](https://github.com/getnamo/TensorFlow-Unreal) 2.0's component builds on it.
+
+```python
+from unreal_bridge.ml import MLPluginAPI      # TFPluginAPI: the same, camelCase hooks (onJsonInput, ...)
+
+class Model(MLPluginAPI):
+    def on_setup(self): ...                   # once, first
+    def on_json_input(self, data): ...        # Send Json Input -> On Input Results
+    def on_tensor_input(self, x): ...         # Send Tensor Input (numpy array)
+    def on_begin_training(self):              # Begin Training: its own thread
+        model.fit(..., callbacks=[ue.keras.StopOnRequest(self), ue.keras.ProgressEvents(self)])
+        return {"accuracy": 0.98}             # -> On Training Complete
+
+def get_api():
+    return Model.get_instance()
+```
+
+**Calls:**
+- Send Json / String / Float Array / Tensor Input;
+- Call Custom Function (any method);
+- Begin / Stop Training, Save / Load Model;
+- async variants of the inputs.
+
+**Events:** On Setup Complete, On Input Results, On Training Started / Progress / Complete (with bStoppedEarly), On Custom Event (`call_event`), and On Script Error, which includes training exceptions.
+
+**Behaviour:**
+- `should_stop` is set by Stop Training and by script stops; inputs keep being answered while training runs.
+- **Train On Begin Play** and **Stop Training On End Play** are component properties.
+- **1.x compatibility:**
+  - `import unreal_engine as ue` (`log`, `get_content_dir`, `run_on_gt`), `from mlpluginapi import MLPluginAPI`, and `getApi()` keep working.
+  - The script name may omit `.py`.
+
 ## Environment
 
 Configure in **Project Settings > Plugins > Python CLI**:
@@ -131,7 +165,10 @@ How it behaves:
 - **The venv is an ordinary venv:** point VS Code or PyCharm at it, or `uv pip install` into it by hand.
 - **Interpreter:** processes always run the bundled interpreter with `-I` (isolated from any system Python and `PYTHONPATH`) and add the venv's site-packages. Moving the project never breaks the environment.
 - **Windows long paths:** without long-path support, keep the venv path short. TensorFlow installs paths 163 characters deep inside site-packages, and setup warns when the configured path is too long.
-- **Other plugins:** they can add requirements with `FPythonEnvironment::RegisterRequirementsFile(Path)`.
+- **Other plugins** extend the environment from their `StartupModule`:
+  - `FPythonEnvironment::RegisterRequirementsFile` adds requirements (`UnregisterRequirementsFile` removes them).
+  - `RegisterScriptDirectory` adds a folder: scripts resolve there after the project's, and it goes on `sys.path`.
+  - `RegisterEnvironmentVariable` sets a variable for new processes; the project's settings win.
 
 ## Python API (`unreal_bridge`)
 
@@ -149,6 +186,8 @@ How it behaves:
 | `ue.stream(name, timeout=None)` | iterate a stream's frames instead (each stays valid until the next) |
 | `StreamFrame` | `.array`, `.rgb()`, `.rows()`, `.copy()`, `.seq`, `.time`, `.frame`, `.layout`, `.meta`, `.info`, `.reply(value)`, `.release()` |
 | `ue.Tensor` | tensor type used without numpy (`.data`, `.dtype`, `.shape`, `.tolist()`, `Tensor.from_list`) |
+| `ue.content_path(*parts)` | a path under the project's Content folder |
+| `unreal_bridge.ml.MLPluginAPI` / `TFPluginAPI`, `ue.keras.StopOnRequest(api)` / `ProgressEvents(api)` | the ML plugin API (see Machine learning) |
 
 ## C++
 
@@ -163,10 +202,10 @@ Python->BindEventNative(TEXT("action"), [](const FPythonEventData& E) { /* E.Arg
 
 ## Tests
 
-- Engine-free protocol tests drive `runtime.py` over frames exactly as Unreal does, streams included (41 checks):
+- Engine-free protocol tests drive `runtime.py` over frames exactly as Unreal does, streams and the ML API included (63 checks):
   `ThirdParty/python/Win64/python.exe -I Content/Python/tests/harness.py [--site <venv>/Lib/site-packages]`
   On Linux: `ThirdParty/python/Linux/bin/python3.12 -I Content/Python/tests/harness.py`
-- In-engine tests (`PythonCLI.*`, 21 of them):
+- In-engine tests (`PythonCLI.*`, 25 of them):
   `UnrealEditor-Cmd.exe <Project>.uproject -ExecCmds="Automation RunTests PythonCLI; Quit" -unattended -nullrhi -nopause`
   - `PythonCLI.Environment.Requirements` installs numpy, so it needs network access or a warm uv cache.
   - `PythonCLI.Streams.RenderTarget` needs a real RHI: run it with `-RenderOffscreen` instead of `-nullrhi`.

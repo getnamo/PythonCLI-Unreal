@@ -310,8 +310,18 @@ void FPythonProcess::Launch()
 	// Runtime config: read by runtime.py before anything is imported
 	TSharedRef<FJsonObject> Config = MakeShared<FJsonObject>();
 	Config->SetArrayField(TEXT("site_dirs"), { MakeShared<FJsonValueString>(Environment->SitePackagesDir()) });
+	TArray<TSharedPtr<FJsonValue>> ScriptDirs;
+	for (const FString& Dir : FPythonEnvironment::GetScriptDirectories())
+	{
+		ScriptDirs.Add(MakeShared<FJsonValueString>(Dir));
+	}
+	Config->SetArrayField(TEXT("script_dirs"), ScriptDirs);
 	TSharedRef<FJsonObject> Env = MakeShared<FJsonObject>();
-	for (const TPair<FString, FString>& Pair : Settings->EnvironmentVariables)
+	for (const TPair<FString, FString>& Pair : FPythonEnvironment::GetEnvironmentVariables())
+	{
+		Env->SetStringField(Pair.Key, Pair.Value);
+	}
+	for (const TPair<FString, FString>& Pair : Settings->EnvironmentVariables) //The project's settings win
 	{
 		Env->SetStringField(Pair.Key, Pair.Value);
 	}

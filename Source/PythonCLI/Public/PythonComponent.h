@@ -105,6 +105,13 @@ public:
 	virtual void BeginPlay() override;
 	virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
 
+protected:
+	/** Subclasses: the script started / stopped (before OnScriptStarted / OnScriptStopped). */
+	virtual void HandleScriptStarted(const FString& Script) {}
+	virtual void HandleScriptStopped(const FString& Script) {}
+	/** Subclasses: an event from the script; return true to consume it (no OnEvent / native handler). */
+	virtual bool HandleScriptEvent(const FPythonEventData& Data) { return false; }
+
 private:
 	bool EnsureProcess();
 	void ReleaseProcess();
