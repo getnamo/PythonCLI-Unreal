@@ -88,6 +88,11 @@ bool FPythonRequirementsTest::RunTest(const FString&)
 	{
 		return true;
 	}
+	if (FPythonEnvironment::IsPackagedBuild() && GetDefault<UPythonCLISettings>()->PackagedEnvMode != EPythonPackagedEnvMode::InstallOnFirstRun)
+	{
+		AddInfo(TEXT("packaged with Bundle: the packages were fixed when the game was packaged"));
+		return true;
+	}
 	//In memory only (not saved to config); restored at the end
 	UPythonCLISettings* Settings = GetMutableDefault<UPythonCLISettings>();
 	const TArray<FString> Saved = Settings->Requirements;

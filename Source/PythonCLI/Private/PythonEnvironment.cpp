@@ -139,8 +139,22 @@ FString FPythonEnvironment::BundledRuntimeVersion()
 	return Version.TrimStartAndEnd();
 }
 
+bool FPythonEnvironment::IsPackagedBuild()
+{
+	return !WITH_EDITOR;
+}
+
+FString FPythonEnvironment::WorkDir()
+{
+	return FPaths::ConvertRelativePathToFull((IsPackagedBuild() ? FPaths::ProjectSavedDir() : FPaths::ProjectIntermediateDir()) / TEXT("PythonCLI"));
+}
+
 FString FPythonEnvironment::VenvDir() const
 {
+	if (IsPackagedBuild())
+	{
+		return WorkDir() / TEXT("venv"); //InstallOnFirstRun: somewhere a packaged game can write
+	}
 	const FString Configured = GetDefault<UPythonCLISettings>()->VenvDirectory;
 	const FString Dir = FPaths::IsRelative(Configured) ? FPaths::ProjectDir() / Configured : Configured;
 	return FPaths::ConvertRelativePathToFull(Dir);
@@ -148,6 +162,14 @@ FString FPythonEnvironment::VenvDir() const
 
 FString FPythonEnvironment::SitePackagesDir() const
 {
+	if (IsPackagedBuild() && GetDefault<UPythonCLISettings>()->PackagedEnvMode == EPythonPackagedEnvMode::Bundle)
+	{
+#if PLATFORM_WINDOWS
+		return FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Intermediate/PythonCLI/packaged/Win64/site-packages")); //Staged by PythonCLI.Build.cs
+#else
+		return FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Intermediate/PythonCLI/packaged/Linux/site-packages"));
+#endif
+	}
 #if PLATFORM_WINDOWS
 	return VenvDir() / TEXT("Lib/site-packages");
 #else
@@ -248,6 +270,24 @@ bool FPythonEnvironment::RunSetup(bool bForceReinstall, FString& OutError)
 {
 	using namespace PythonEnvironmentPrivate;
 	const UPythonCLISettings* Settings = GetDefault<UPythonCLISettings>();
+	if (IsPackagedBuild() && Settings->PackagedEnvMode == EPythonPackagedEnvMode::None)
+	{
+		OutError = TEXT("Python is not part of this build (Project Settings > Python CLI > Packaged Env Mode is None)");
+		return false;
+	}
+	if (IsPackagedBuild() && Settings->PackagedEnvMode == EPythonPackagedEnvMode::Bundle)
+	{
+		//Packages were installed for this platform and staged when the game was packaged: nothing to install
+		if (!FPaths::FileExists(InterpreterPath()))
+		{
+			OutError = FString::Printf(TEXT("The bundled Python interpreter is missing (%s)"), *InterpreterPath());
+			return false;
+		}
+		EnsureExecutable(InterpreterPath());
+		UE_LOG(LogPythonCLI, Log, TEXT("Python packages bundled with the build: %s%s"), *SitePackagesDir(),
+			FPaths::DirectoryExists(SitePackagesDir()) ? TEXT("") : TEXT(" (none)"));
+		return true;
+	}
 	const FString Interpreter = InterpreterPath();
 	const FString Uv = UvPath();
 	if (!FPaths::FileExists(Interpreter) || !FPaths::FileExists(Uv))

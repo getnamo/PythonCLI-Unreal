@@ -339,7 +339,7 @@ void FPythonProcess::Launch()
 	Config->SetStringField(TEXT("content_dir"), FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir()));
 	Config->SetStringField(TEXT("process"), Name);
 
-	const FString ConfigPath = FPaths::ConvertRelativePathToFull(FPaths::ProjectIntermediateDir() / TEXT("PythonCLI") / FString::Printf(TEXT("runtime_%s.json"), *Name));
+	const FString ConfigPath = FPythonEnvironment::WorkDir() / FString::Printf(TEXT("runtime_%s.json"), *Name);
 	FFileHelper::SaveStringToFile(PythonWire::ToJsonString(MakeShared<FJsonValueObject>(Config)), *ConfigPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 
 	const FString Interpreter = FPythonEnvironment::InterpreterPath();

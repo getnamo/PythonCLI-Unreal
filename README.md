@@ -7,7 +7,7 @@ Scripts run **out of process**: e.g. a crash in a native ML library never takes 
 
 It's the base for the [TensorFlow-Unreal](https://github.com/getnamo/TensorFlow-Unreal) 2.0 refactor, and for PyTorch workflows.
 
-Status: **0.3.0 (beta)**. Win64 tested; Linux x86_64 tested for the Python side.
+Status: **0.4.0 (beta)**. Win64 tested in the editor and in packaged builds; Linux x86_64 tested in packaged builds.
 
 | Piece | What it is |
 |---|---|
@@ -170,6 +170,22 @@ How it behaves:
   - `RegisterScriptDirectory` adds a folder: scripts resolve there after the project's, and it goes on `sys.path`.
   - `RegisterEnvironmentVariable` sets a variable for new processes; the project's settings win.
 
+## Packaging
+
+Packaged builds (Win64 and Linux) ship the interpreter, the bridge and the project's `Content/Scripts`. **Project Settings > Plugins > Python CLI > Packaging > Packaged Env Mode** decides how the Python packages get there:
+
+| Mode | When packaging | When the game runs |
+|---|---|---|
+| Bundle (default) | installs the packages for the target platform and stages them with the build | Python starts with the bundled packages; nothing is installed and uv isn't shipped |
+| Install On First Run | ships uv | the first launch installs the packages into `Saved/PythonCLI/venv`; needs network access or an index you host |
+| None | ships no Python | scripts don't start, e.g. when models are exported to ONNX and run with NNE |
+
+- **What Bundle installs:** the packages the editor's environment was last set up with. Setup writes them to `Intermediate/PythonCLI/requirements.txt`, so open the project in the editor once before packaging.
+- **Cross-platform:** uv installs for the target platform, so a Linux build packaged on Windows gets Linux wheels.
+- **Caching:** the install is cached in `Intermediate/PythonCLI/packaged/<Platform>`. It repeats only when the requirements, the index settings or the runtime change.
+- **Size:** C headers and bytecode caches are left out. The tensorflow-cpu environment is about 1.2 GB (Linux) to 1.3 GB (Win64); CUDA builds of torch or TensorFlow are several GB. Install On First Run keeps that out of the build.
+- **Packaged games** keep their process configs, and with Install On First Run the venv, in `Saved/PythonCLI`.
+
 ## Python API (`unreal_bridge`)
 
 | | |
@@ -210,6 +226,7 @@ Python->BindEventNative(TEXT("action"), [](const FPythonEventData& E) { /* E.Arg
   - `PythonCLI.Environment.Requirements` installs numpy, so it needs network access or a warm uv cache.
   - `PythonCLI.Streams.RenderTarget` needs a real RHI: run it with `-RenderOffscreen` instead of `-nullrhi`.
   - `PythonCLI.Streams.Microphone` opens your microphone, so it only runs with `-PythonCLIMicTest`.
+- Packaged Development builds run the same tests: `<Game>.exe -ExecCmds="Automation RunTests PythonCLI; Quit" -unattended -nullrhi`. With Bundle, `PythonCLI.Environment.Requirements` is skipped, because the packages were fixed at packaging time.
 
 ## Protocol
 
@@ -233,6 +250,5 @@ Frames (same layout as CLISystem's `FCLIFrameCodec`, magic `PUE\x01`): `MAGIC | 
 ## Roadmap
 
 - Render targets GPU-to-GPU (D3D12 shared handle → CUDA → DLPack) to skip the readback.
-- The ML component (`MLPluginAPI` / `TFPluginAPI`) and TensorFlow-Unreal 2.0.
-- Linux editor validation, packaging modes, releases.
+- Linux editor validation.
 - Torch-Unreal.

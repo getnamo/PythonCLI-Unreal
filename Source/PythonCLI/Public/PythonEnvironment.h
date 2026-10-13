@@ -53,8 +53,15 @@ public:
 	static FString UvPath();
 	static bool HasBundledRuntime();
 	static FString BundledRuntimeVersion();
+	/** Editor: the venv (Venv Directory setting). Packaged with InstallOnFirstRun: Saved/PythonCLI/venv. */
 	FString VenvDir() const;
+	/** The venv's site-packages; in a packaged Bundle build, the packages staged with it
+	 (Intermediate/PythonCLI/packaged/<Platform>/site-packages). */
 	FString SitePackagesDir() const;
+	/** Where runtime configs and generated files go: Intermediate/PythonCLI (editor), Saved/PythonCLI (packaged). */
+	static FString WorkDir();
+	/** True in packaged (non-editor) builds, where Project Settings > Python CLI > Packaged Env Mode applies. */
+	static bool IsPackagedBuild();
 	/** The file the requirements are combined into for uv. */
 	FString RequirementsPath() const;
 

@@ -20,6 +20,11 @@ void UPythonSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 	});
 
 	const UPythonCLISettings* Settings = GetDefault<UPythonCLISettings>();
+	if (FPythonEnvironment::IsPackagedBuild() && Settings->PackagedEnvMode == EPythonPackagedEnvMode::None)
+	{
+		UE_LOG(LogPythonCLI, Log, TEXT("Python is not part of this build (Packaged Env Mode: None)"));
+		return;
+	}
 	if (!FPythonEnvironment::HasBundledRuntime())
 	{
 		UE_LOG(LogPythonCLI, Warning, TEXT("The bundled Python runtime is missing: run Tools/FetchRuntime.ps1 (or Tools/fetch_runtime.sh) in %s"), *FPythonEnvironment::PluginDir());

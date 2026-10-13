@@ -4,6 +4,21 @@
 #include "Engine/DeveloperSettings.h"
 #include "PythonCLISettings.generated.h"
 
+/** How Python reaches packaged builds (the editor always uses the project's venv). */
+UENUM(BlueprintType)
+enum class EPythonPackagedEnvMode : uint8
+{
+	/** Packaging installs the environment's packages for the target platform (uv, also cross-platform:
+	 Linux packages from Windows) and stages them with the build, next to the bundled interpreter.
+	 Large with CUDA builds of torch or TensorFlow (gigabytes). */
+	Bundle,
+	/** The packaged game installs its packages with the bundled uv on first launch (into Saved/PythonCLI).
+	 Small builds; needs internet access (or an index you host) on first run. */
+	InstallOnFirstRun,
+	/** No Python in packaged builds (e.g. models exported to ONNX and run with NNE): scripts don't start. */
+	None,
+};
+
 /** Project Settings > Plugins > Python CLI. */
 UCLASS(config = Game, defaultconfig, meta = (DisplayName = "Python CLI"))
 class PYTHONCLI_API UPythonCLISettings : public UDeveloperSettings
@@ -56,6 +71,12 @@ public:
 	/** Seconds scripts get to run on_stop() when a process shuts down. */
 	UPROPERTY(config, EditAnywhere, Category = "Process")
 	float ShutdownGraceSeconds = 0.5f;
+
+	/** How packaged builds get Python packages. Bundle packages what the editor's environment was last set up
+	 with (Intermediate/PythonCLI/requirements.txt). Project scripts (Content/Scripts) are staged either way,
+	 unless None. */
+	UPROPERTY(config, EditAnywhere, Category = "Packaging")
+	EPythonPackagedEnvMode PackagedEnvMode = EPythonPackagedEnvMode::Bundle;
 
 	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
 
