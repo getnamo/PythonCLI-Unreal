@@ -105,7 +105,7 @@ def act(frame):
   - **Lockstep** (ML tests): **Step** sends the observation and blocks the game thread until the handler returns its action. With a fixed timestep this gives a deterministic `step()` loop. In Blueprint, read the action from the result's JSON with **Get Json Number** (`"force"`, `"action.move"`, `"values.2"`).
 - **Iterating instead:** `for frame in ue.stream("camera"):` in a `ue.run_in_background` thread.
 - **Stats:** Get Stream Stats reports sent, dropped, acked, in flight and the ACK latency.
-- **Measured (Win64, i9-7980XE):**
+- **Measured (Win64):**
   - 1080p RGBA8 through shared memory: about 2,200 fps (18 GB/s, including Unreal filling each frame and Python checking it).
   - 256-byte inline frames: about 13,900/s.
   - Lockstep step round trip: p50 0.3 ms.
