@@ -131,9 +131,13 @@ namespace PythonWire
 		Reply = 4,
 		Control = 5,
 		Status = 6,
+		/** Stream data, Unreal -> Python. */
+		Stream = 7,
+		/** A stream slot handed back, Python -> Unreal. */
+		Ack = 8,
 	};
 
-	/** Build an EVENT/CONTROL frame. */
+	/** Build a frame. */
 	PYTHONCLI_API TArray<uint8> EncodeFrame(EFrameType Type, const TSharedRef<class FJsonObject>& Header, TConstArrayView<uint8> Binary = {});
 
 	/** JsonArgs (a JSON array, or a single value wrapped into one) plus tensors appended as

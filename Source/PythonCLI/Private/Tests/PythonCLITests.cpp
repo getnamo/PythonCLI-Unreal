@@ -7,11 +7,13 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "PythonBlueprintLibrary.h"
 #include "PythonComponent.h"
 #include "PythonEnvironment.h"
 #include "PythonProcess.h"
 #include "PythonCLISettings.h"
 #include "PythonSubsystem.h"
+#include "PythonTestHelpers.h"
 #include "PythonTestReceiver.h"
 #include "Dom/JsonObject.h"
 #include "Engine/Engine.h"
@@ -19,111 +21,6 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "Misc/Paths.h"
-
-namespace PythonCLITests
-{
-	constexpr EAutomationTestFlags Flags = EAutomationTestFlags::EditorContext | EAutomationTestFlags::ClientContext | EAutomationTestFlags::ProductFilter;
-	constexpr double Timeout = 60.0; //First run creates the venv
-	static const TCHAR* Fixture = TEXT("tests/scripts/fixture.py");
-
-	struct FEnv
-	{
-		UGameInstance* GameInstance = nullptr;
-		UWorld* World = nullptr;
-		TArray<TWeakObjectPtr<AActor>> Actors;
-		TArray<UPythonTestReceiver*> Receivers;
-
-		void Create()
-		{
-			GameInstance = NewObject<UGameInstance>(GEngine);
-			GameInstance->AddToRoot();
-			GameInstance->InitializeStandalone();
-			World = GameInstance->GetWorld();
-			World->InitializeActorsForPlay(FURL());
-		}
-
-		/** Configure runs before registration/BeginPlay, like editing the component's details. */
-		UPythonComponent* Add(UPythonTestReceiver*& OutReceiver, TFunctionRef<void(UPythonComponent*)> Configure)
-		{
-			OutReceiver = NewObject<UPythonTestReceiver>();
-			OutReceiver->AddToRoot();
-			Receivers.Add(OutReceiver);
-			AActor* Actor = World->SpawnActor<AActor>();
-			UPythonComponent* C = NewObject<UPythonComponent>(Actor);
-			C->ScriptParams.Script = Fixture;
-			Configure(C);
-			C->OnScriptStarted.AddDynamic(OutReceiver, &UPythonTestReceiver::OnStarted);
-			C->OnScriptStopped.AddDynamic(OutReceiver, &UPythonTestReceiver::OnStopped);
-			C->OnScriptError.AddDynamic(OutReceiver, &UPythonTestReceiver::OnError);
-			C->OnEvent.AddDynamic(OutReceiver, &UPythonTestReceiver::OnEvent);
-			C->OnLog.AddDynamic(OutReceiver, &UPythonTestReceiver::OnLog);
-			C->RegisterComponent();
-			Actor->DispatchBeginPlay();
-			Actors.Add(Actor);
-			return C;
-		}
-
-		void Destroy()
-		{
-			for (const TWeakObjectPtr<AActor>& A : Actors)
-			{
-				if (A.IsValid())
-				{
-					A->Destroy();
-				}
-			}
-			GameInstance->Shutdown();
-			GEngine->DestroyWorldContext(World);
-			World->DestroyWorld(false);
-			GameInstance->RemoveFromRoot();
-			for (UPythonTestReceiver* R : Receivers)
-			{
-				R->RemoveFromRoot();
-			}
-		}
-	};
-
-	static void Step(TFunction<void()> Fn)
-	{
-		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Fn]() { Fn(); return true; }));
-	}
-
-	static void WaitUntil(FAutomationTestBase* Test, const FString& Label, TFunction<bool()> Condition, double InTimeout = Timeout)
-	{
-		const TSharedRef<double> Deadline = MakeShared<double>(0.0);
-		ADD_LATENT_AUTOMATION_COMMAND(FFunctionLatentCommand([Test, Label, Condition, Deadline, InTimeout]() -> bool
-		{
-			if (*Deadline == 0.0)
-			{
-				*Deadline = FPlatformTime::Seconds() + InTimeout;
-			}
-			if (Condition())
-			{
-				return true;
-			}
-			if (FPlatformTime::Seconds() > *Deadline)
-			{
-				Test->AddError(TEXT("Timed out waiting for ") + Label);
-				return true;
-			}
-			return false;
-		}));
-	}
-
-	/** Call and keep the result in Out; Done flips when it arrives. */
-	struct FCall
-	{
-		bool bDone = false;
-		FPythonCallResult Result;
-	};
-
-	static TSharedRef<FCall> Call(UPythonComponent* C, const FString& Function, const FString& JsonArgs, const TArray<FPyTensor>& Tensors = {})
-	{
-		TSharedRef<FCall> Out = MakeShared<FCall>();
-		C->CallFunction(Function, JsonArgs, Tensors, [Out](const FPythonCallResult& R) { Out->Result = R; Out->bDone = true; });
-		return Out;
-	}
-}
 
 using namespace PythonCLITests;
 
@@ -143,6 +40,23 @@ bool FPythonWirePackTest::RunTest(const FString&)
 	TestTrue(TEXT("tensor appended"), PythonWire::PackArgs(TEXT("[7]"), { T }, Args, Table, Error) && Args.Num() == 2);
 	const TArray<FPyTensor> Back = PythonWire::UnpackTensors(MakeShared<FJsonValueArray>(Args), Table);
 	TestTrue(TEXT("tensor round trip through the wire format"), Back.Num() == 1 && Back[0].DType == EPyDType::Float32 && Back[0].Shape == TArray<int64>({ 2, 3 }) && Back[0].Data == T.Data);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPythonJsonHelpersTest, "PythonCLI.Wire.JsonHelpers", PythonCLITests::Flags)
+bool FPythonJsonHelpersTest::RunTest(const FString&)
+{
+	const FString Json = TEXT("{\"force\": 0.25, \"action\": {\"name\": \"jump\", \"values\": [1, 2.5, -3]}}");
+	double Number = 0.0;
+	FString Text;
+	TArray<float> Floats;
+	TestTrue(TEXT("field"), UPythonBlueprintLibrary::GetJsonNumber(Json, TEXT("force"), Number) && Number == 0.25);
+	TestTrue(TEXT("nested field + index"), UPythonBlueprintLibrary::GetJsonNumber(Json, TEXT("action.values.1"), Number) && Number == 2.5);
+	TestTrue(TEXT("string"), UPythonBlueprintLibrary::GetJsonString(Json, TEXT("action.name"), Text) && Text == TEXT("jump"));
+	TestTrue(TEXT("array"), UPythonBlueprintLibrary::GetJsonFloats(Json, TEXT("action.values"), Floats) && Floats == TArray<float>({ 1.f, 2.5f, -3.f }));
+	TestTrue(TEXT("root value"), UPythonBlueprintLibrary::GetJsonNumber(TEXT("5"), TEXT(""), Number) && Number == 5.0);
+	TestFalse(TEXT("missing path"), UPythonBlueprintLibrary::GetJsonNumber(Json, TEXT("action.values.9"), Number));
+	TestFalse(TEXT("wrong type"), UPythonBlueprintLibrary::GetJsonNumber(Json, TEXT("action.name"), Number));
 	return true;
 }
 

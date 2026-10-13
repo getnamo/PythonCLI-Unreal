@@ -7,7 +7,7 @@ Scripts run **out of process**: e.g. a crash in a native ML library never takes 
 
 It's the base for the [TensorFlow-Unreal](https://github.com/getnamo/TensorFlow-Unreal) 2.0 refactor, and for PyTorch workflows.
 
-Status: **0.1.0 (beta)**. Win64 tested; Linux x86_64 tested for the Python side.
+Status: **0.2.0 (beta)**. Win64 tested; Linux x86_64 tested for the Python side.
 
 | Piece | What it is |
 |---|---|
@@ -75,6 +75,43 @@ The bundled examples need no copying: `Script = "examples/echo.py"` or `"example
 - **Long work:** check `ue.should_stop()`, so that StopScript, Reload and EndPlay can finish. For parallel work, use `ue.run_in_background(fn)`.
 - **Errors:** an exception in a handler or call is reported, with its traceback, to the call's On Failure, to On Log, and to the Output Log. A native crash ends the process: pending calls fail, On Script Error fires, and the crash dump appears in the Output Log. The next Start Script brings the process back.
 
+## Streams
+
+For data that flows every frame, add a stream component next to the Python component. Its script handles the frames with `@ue.on_stream("name")`:
+
+| Component | Python gets |
+|---|---|
+| **Python Render Target Stream** | a render target (for example a Scene Capture 2D's), read back asynchronously on the GPU, without a `ReadPixels` stall: `(H, W, C)` arrays, uint8 BGRA for RTF_RGBA8 (`frame.rgb()` gives RGB), float16 for RTF_RGBA16f, float32 for RTF_R32f |
+| **Python Audio Stream** | microphone, submix (the game's audio) or pushed samples, as `(frames, channels)` float32 chunks of `ChunkSeconds`, with `frame.meta["sample_rate"]` |
+| **Python Observation Stream** | rows of named float features (Set Feature, Commit Row): `(rows, features)` float32; `frame.rows()` gives dicts |
+| **Python Stream** | any tensor you push (Push Tensor) |
+
+```python
+@ue.on_stream("camera")
+def see(frame):
+    rgb = frame.rgb()            # zero-copy view of Unreal's shared memory, valid until this returns
+    x = torch.from_numpy(frame.copy()).cuda(non_blocking=True)
+
+@ue.on_stream("agent")           # Lockstep: Unreal's Step waits for the return value
+def act(frame):
+    obs = frame.rows()[-1]       # {"x": ..., "v": ...}
+    return {"force": policy(obs)}
+```
+
+- **Slots:** each stream has a few slots (Slots). Unreal writes a slot and sends it, and the slot comes back when the handler returns. Frames of 32 KB or more live in a shared-memory region; smaller ones travel inline. Both are the same in Python.
+- **Policies:**
+  - **Latest** (render targets): when Python falls behind, Unreal drops new frames and Python skips stale ones, so handlers always see the freshest frame.
+  - **Queue** (observations, audio): every frame arrives, in order. Observation producers wait up to MaxWaitSeconds for a slot. Render-target and audio producers never wait; they drop and count it.
+  - **Lockstep** (ML tests): **Step** sends the observation and blocks the game thread until the handler returns its action. With a fixed timestep this gives a deterministic `step()` loop. In Blueprint, read the action from the result's JSON with **Get Json Number** (`"force"`, `"action.move"`, `"values.2"`).
+- **Iterating instead:** `for frame in ue.stream("camera"):` in a `ue.run_in_background` thread.
+- **Stats:** Get Stream Stats reports sent, dropped, acked, in flight and the ACK latency.
+- **Measured (Win64, i9-7980XE):**
+  - 1080p RGBA8 through shared memory: about 2,200 fps (18 GB/s, including Unreal filling each frame and Python checking it).
+  - 256-byte inline frames: about 13,900/s.
+  - Lockstep step round trip: p50 0.3 ms.
+  - Render-target readback: ready about 2 frames after capture.
+- **Example:** `examples/streams.py` handles all four kinds.
+
 ## Environment
 
 Configure in **Project Settings > Plugins > Python CLI**:
@@ -108,6 +145,9 @@ How it behaves:
 | `ue.should_stop()`, `ue.stopping` | cooperative stop |
 | `ue.run_in_background(fn, *args)` | thread that belongs to the script (emit/log work from it) |
 | `ue.log / ue.warning / ue.error`, `print` | output to On Log and the Output Log |
+| `@ue.on_stream("name")` / `@ue.on_stream` | handle a stream's frames; for Lockstep streams the return value is the step's result |
+| `ue.stream(name, timeout=None)` | iterate a stream's frames instead (each stays valid until the next) |
+| `StreamFrame` | `.array`, `.rgb()`, `.rows()`, `.copy()`, `.seq`, `.time`, `.frame`, `.layout`, `.meta`, `.info`, `.reply(value)`, `.release()` |
 | `ue.Tensor` | tensor type used without numpy (`.data`, `.dtype`, `.shape`, `.tolist()`, `Tensor.from_list`) |
 
 ## C++
@@ -116,16 +156,21 @@ How it behaves:
 Python->CallFunction(TEXT("predict"), TEXT("[]"), { FPyTensor::FromFloats(Pixels, { 64, 64, 3 }) },
     [](const FPythonCallResult& R) { if (R.bSuccess) { /* R.Result (FJsonValue), R.Tensors */ } });
 Python->BindEventNative(TEXT("action"), [](const FPythonEventData& E) { /* E.Args, E.Tensors */ });
+
+// Streams from any thread (render thread, audio thread): FPythonStream::Open, then AcquireSlot / GetSlotData /
+// Commit, or Push; Step for lockstep.
 ```
 
 ## Tests
 
-- Engine-free protocol tests drive `runtime.py` over frames exactly as Unreal does (29 checks):
+- Engine-free protocol tests drive `runtime.py` over frames exactly as Unreal does, streams included (41 checks):
   `ThirdParty/python/Win64/python.exe -I Content/Python/tests/harness.py [--site <venv>/Lib/site-packages]`
   On Linux: `ThirdParty/python/Linux/bin/python3.12 -I Content/Python/tests/harness.py`
-- In-engine tests (`PythonCLI.*`, 11 of them):
+- In-engine tests (`PythonCLI.*`, 21 of them):
   `UnrealEditor-Cmd.exe <Project>.uproject -ExecCmds="Automation RunTests PythonCLI; Quit" -unattended -nullrhi -nopause`
-  `PythonCLI.Environment.Requirements` installs numpy, so it needs network access or a warm uv cache.
+  - `PythonCLI.Environment.Requirements` installs numpy, so it needs network access or a warm uv cache.
+  - `PythonCLI.Streams.RenderTarget` needs a real RHI: run it with `-RenderOffscreen` instead of `-nullrhi`.
+  - `PythonCLI.Streams.Microphone` opens your microphone, so it only runs with `-PythonCLIMicTest`.
 
 ## Protocol
 
@@ -136,15 +181,19 @@ Frames (same layout as CLISystem's `FCLIFrameCodec`, magic `PUE\x01`): `MAGIC | 
 | 1 | LOG | py → UE | `owner?, script?, level, msg` |
 | 2 | RAWLOG | py → UE | native stdout/stderr (binary = text) |
 | 3 | EVENT | both | `owner, script, name, args[, id]` + binary table |
-| 4 | REPLY | py → UE | `owner, script, id, ok, result \| error, traceback` + binary table |
-| 5 | CONTROL | UE → py | `cmd`: `start`, `stop`, `reload`, `stopOwner`, `exit`, `ping` |
-| 6 | STATUS | py → UE | `status`: `ready`, `preloaded`, `started`, `stopped`, `error`, `exiting`, `pong` |
+| 4 | REPLY | py → UE | `owner, script, id \| sid, ok, result \| error, traceback` + binary table |
+| 5 | CONTROL | UE → py | `cmd`: `start`, `stop`, `reload`, `stopOwner`, `exit`, `ping`, `openStream`, `closeStream` |
+| 6 | STATUS | py → UE | `status`: `ready`, `preloaded`, `started`, `stopped`, `error`, `exiting`, `pong`, `streamError` |
+| 7 | STREAM | UE → py | `owner, stream, seq, slot, t, frame, dtype, shape, nbytes, layout?, meta?, sid?` + inline data (shared-memory streams: none) |
+| 8 | ACK | py → UE | `owner, stream, slot, seq`: the slot is Unreal's again |
+
+`openStream` carries `stream, slots, slot_bytes, policy, shm` (a `{GUID}` region name, or null for inline) and `info`. Unreal handles ACKs and lockstep replies (`sid`) on its pipe thread, so they arrive while the game thread is blocked in a step.
 
 `runtime.py` keeps the protocol on a private copy of stdout and redirects fd 1/2 into a capture pipe. Output from native code therefore can't corrupt frames; it arrives as RAWLOG. A hard crash's `faulthandler` dump arrives as stray text, which is logged.
 
 ## Roadmap
 
-- Streaming: shared-memory rings for render targets, audio and gameplay observations.
+- Render targets GPU-to-GPU (D3D12 shared handle → CUDA → DLPack) to skip the readback.
 - The ML component (`MLPluginAPI` / `TFPluginAPI`) and TensorFlow-Unreal 2.0.
 - Linux editor validation, packaging modes, releases.
 - Torch-Unreal.

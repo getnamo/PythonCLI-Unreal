@@ -28,4 +28,17 @@ public:
 	/** Data size matches dtype x shape. */
 	UFUNCTION(BlueprintPure, Category = "Python|Tensor")
 	static bool IsTensorValid(const FPyTensor& Tensor);
+
+	/** A number in JSON such as a call or step result. Path: "" for the value itself, else fields and array
+	 indices separated by dots ("force", "action.move", "values.2"). */
+	UFUNCTION(BlueprintPure, Category = "Python|JSON", meta = (AutoCreateRefTerm = "Path"))
+	static bool GetJsonNumber(const FString& Json, const FString& Path, double& Value);
+
+	/** A string, number or bool in JSON as text (path as in GetJsonNumber). */
+	UFUNCTION(BlueprintPure, Category = "Python|JSON", meta = (AutoCreateRefTerm = "Path"))
+	static bool GetJsonString(const FString& Json, const FString& Path, FString& Value);
+
+	/** An array of numbers in JSON (path as in GetJsonNumber). */
+	UFUNCTION(BlueprintPure, Category = "Python|JSON", meta = (AutoCreateRefTerm = "Path"))
+	static bool GetJsonFloats(const FString& Json, const FString& Path, TArray<float>& Values);
 };

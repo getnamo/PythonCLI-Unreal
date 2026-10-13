@@ -2,8 +2,10 @@
 #include "PythonEnvironment.h"
 #include "PythonCLI.h"
 #include "PythonCLISettings.h"
+#include "PythonStream.h"
 #include "Async/Async.h"
 #include "CLIFrameCodec.h"
+#include "HAL/Event.h"
 #include "HAL/PlatformProcess.h"
 #include "HAL/PlatformTime.h"
 #include "Misc/FileHelper.h"
@@ -47,16 +49,227 @@ namespace PythonProcessPrivate
 	}
 }
 
+// ------------------------------------------------------------------------------------------ FPythonChannel
+
+struct FPythonChannel::FWaiter
+{
+	FEvent* Event = FPlatformProcess::GetSynchEventFromPool(true);
+	bool bDone = false; //Guarded by the channel's lock, like Result
+	FPythonCallResult Result;
+
+	~FWaiter() { FPlatformProcess::ReturnSynchEventToPool(Event); }
+};
+
+FPythonChannel::~FPythonChannel()
+{
+	Detach(TEXT("the Python process is gone"));
+}
+
+bool FPythonChannel::Send(const TArray<uint8>& Frame)
+{
+	FScopeLock L(&Lock);
+	if (!Handler.IsValid())
+	{
+		return false;
+	}
+	Handler->SendInput(Frame); //Async writes: a lock-free queue for the writer thread
+	return true;
+}
+
+bool FPythonChannel::IsRunning() const
+{
+	FScopeLock L(&Lock);
+	return Handler.IsValid();
+}
+
+void FPythonChannel::AddStream(const TSharedRef<FPythonStream, ESPMode::ThreadSafe>& Stream)
+{
+	FScopeLock L(&Lock);
+	Streams.Add(Stream->GetKey(), Stream);
+}
+
+void FPythonChannel::RemoveStream(const FString& Key)
+{
+	FScopeLock L(&Lock);
+	Streams.Remove(Key);
+}
+
+TArray<TSharedRef<FPythonStream, ESPMode::ThreadSafe>> FPythonChannel::GetStreams() const
+{
+	TArray<TSharedRef<FPythonStream, ESPMode::ThreadSafe>> Out;
+	FScopeLock L(&Lock);
+	for (const TPair<FString, TWeakPtr<FPythonStream, ESPMode::ThreadSafe>>& Pair : Streams)
+	{
+		if (TSharedPtr<FPythonStream, ESPMode::ThreadSafe> S = Pair.Value.Pin())
+		{
+			Out.Add(S.ToSharedRef());
+		}
+	}
+	return Out;
+}
+
+int64 FPythonChannel::BeginWait()
+{
+	FScopeLock L(&Lock);
+	const int64 Id = ++NextWaitId;
+	Waiters.Add(Id, MakeShared<FWaiter, ESPMode::ThreadSafe>());
+	return Id;
+}
+
+void FPythonChannel::CancelWait(int64 Id)
+{
+	FScopeLock L(&Lock);
+	Waiters.Remove(Id);
+}
+
+bool FPythonChannel::Wait(int64 Id, double TimeoutSeconds, FPythonCallResult& Out)
+{
+	TSharedPtr<FWaiter, ESPMode::ThreadSafe> W;
+	{
+		FScopeLock L(&Lock);
+		W = Waiters.FindRef(Id);
+	}
+	if (!W.IsValid())
+	{
+		Out = FPythonCallResult();
+		Out.Error = TEXT("unknown step");
+		return false;
+	}
+	W->Event->Wait(FTimespan::FromSeconds(FMath::Max(TimeoutSeconds, 0.0)));
+	FScopeLock L(&Lock);
+	Waiters.Remove(Id);
+	if (!W->bDone)
+	{
+		Out = FPythonCallResult();
+		Out.Error = FString::Printf(TEXT("no result from Python within %.1f s"), TimeoutSeconds);
+		return false;
+	}
+	Out = MoveTemp(W->Result);
+	return Out.bSuccess;
+}
+
+void FPythonChannel::Attach(TSharedPtr<FSubProcessHandler> InHandler, uint32 InGeneration)
+{
+	FScopeLock L(&Lock);
+	Handler = MoveTemp(InHandler);
+	Generation = InGeneration;
+}
+
+void FPythonChannel::Detach(const FString& Reason)
+{
+	TArray<TSharedPtr<FPythonStream, ESPMode::ThreadSafe>> Reset;
+	{
+		FScopeLock L(&Lock);
+		Handler.Reset();
+		Generation = 0;
+		for (TPair<int64, TSharedPtr<FWaiter, ESPMode::ThreadSafe>>& Pair : Waiters)
+		{
+			if (!Pair.Value->bDone)
+			{
+				Pair.Value->bDone = true;
+				Pair.Value->Result = FPythonCallResult();
+				Pair.Value->Result.Error = Reason;
+				Pair.Value->Event->Trigger();
+			}
+		}
+		for (const TPair<FString, TWeakPtr<FPythonStream, ESPMode::ThreadSafe>>& Pair : Streams)
+		{
+			Reset.Add(Pair.Value.Pin());
+		}
+	}
+	for (const TSharedPtr<FPythonStream, ESPMode::ThreadSafe>& S : Reset)
+	{
+		if (S.IsValid())
+		{
+			S->ResetSlots();
+		}
+	}
+}
+
+bool FPythonChannel::HandleOnPipeThread(uint32 FrameGeneration, uint8 Type, const TSharedPtr<FJsonObject>& H, const TArray<uint8>& Binary)
+{
+	if (Type == PythonWire::Ack)
+	{
+		TSharedPtr<FPythonStream, ESPMode::ThreadSafe> Stream;
+		{
+			FScopeLock L(&Lock);
+			if (FrameGeneration != Generation)
+			{
+				return true; //From an earlier launch: its slots were reset when it ended
+			}
+			Stream = Streams.FindRef(H->GetStringField(TEXT("owner")) + TEXT("/") + H->GetStringField(TEXT("stream"))).Pin();
+		}
+		if (Stream.IsValid())
+		{
+			Stream->HandleAck((int32)H->GetNumberField(TEXT("slot")));
+		}
+		return true;
+	}
+	if (Type == PythonWire::Reply && H->HasField(TEXT("sid")))
+	{
+		FPythonCallResult R;
+		R.bSuccess = H->GetBoolField(TEXT("ok"));
+		if (R.bSuccess)
+		{
+			R.Result = H->TryGetField(TEXT("result"));
+			R.JsonResult = PythonWire::ToJsonString(R.Result);
+			R.Tensors = PythonWire::UnpackTensors(R.Result, Binary);
+		}
+		else
+		{
+			H->TryGetStringField(TEXT("error"), R.Error);
+			H->TryGetStringField(TEXT("traceback"), R.Traceback);
+		}
+		FScopeLock L(&Lock);
+		const TSharedPtr<FWaiter, ESPMode::ThreadSafe> W = Waiters.FindRef((int64)H->GetNumberField(TEXT("sid")));
+		if (W.IsValid() && !W->bDone && FrameGeneration == Generation)
+		{
+			W->Result = MoveTemp(R);
+			W->bDone = true;
+			W->Event->Trigger();
+		}
+		return true; //A late reply (the step timed out) is dropped
+	}
+	return false;
+}
+
+// ------------------------------------------------------------------------------------------ FPythonProcess
+
 FPythonProcess::FPythonProcess(const FString& InName, bool bInPreload)
 	: Name(InName)
 	, bPreload(bInPreload)
+	, Channel(MakeShared<FPythonChannel, ESPMode::ThreadSafe>())
 {
 }
 
 FPythonProcess::~FPythonProcess()
 {
 	++Generation;
+	Channel->Detach(TEXT("the Python process was destroyed"));
 	Handler.Reset(); //Threaded CLISystem handler: terminates the process if still running and joins its threads
+}
+
+void FPythonProcess::OpenStream(const TSharedRef<FPythonStream, ESPMode::ThreadSafe>& Stream)
+{
+	Channel->AddStream(Stream);
+	if (Handler.IsValid() && (bStarting || bRunning))
+	{
+		Handler->SendInput(PythonWire::EncodeFrame(PythonWire::Control, Stream->MakeOpenHeader()));
+	}
+	//Otherwise Launch() opens it
+}
+
+void FPythonProcess::CloseStream(const FString& Owner, const FString& StreamName)
+{
+	Channel->RemoveStream(Owner + TEXT("/") + StreamName);
+	if (Handler.IsValid() && (bStarting || bRunning))
+	{
+		TSharedRef<FJsonObject> Header = MakeShared<FJsonObject>();
+		Header->SetStringField(TEXT("cmd"), TEXT("closeStream"));
+		Header->SetStringField(TEXT("owner"), Owner);
+		Header->SetStringField(TEXT("stream"), StreamName);
+		Handler->SendInput(PythonWire::EncodeFrame(PythonWire::Control, Header));
+	}
 }
 
 void FPythonProcess::Start(TSharedPtr<FPythonEnvironment, ESPMode::ThreadSafe> InEnvironment)
@@ -164,11 +377,11 @@ void FPythonProcess::Launch()
 		}
 	};
 	Handler->OnProcessOutput = [](int32, const FString&) {};
-	Handler->OnProcessOutputBytes = [Weak, Gen, State](int32, const TArray<uint8>& Bytes)
+	Handler->OnProcessOutputBytes = [Weak, Gen, State, InChannel = Channel](int32, const TArray<uint8>& Bytes)
 	{
-		//Pipe thread: decode, then hand each frame to the game thread
+		//Pipe thread: decode; stream ACKs and step replies are handled right here, the rest goes to the game thread
 		State->Decoder.Feed(Bytes,
-			[&Weak, Gen, &State](FCLIFrame& Raw)
+			[&Weak, Gen, &State, &InChannel](FCLIFrame& Raw)
 			{
 				FPythonFrame Frame;
 				Frame.Type = (PythonWire::EFrameType)Raw.Type;
@@ -180,6 +393,10 @@ void FPythonProcess::Launch()
 				if (Frame.Type == PythonWire::Status && Frame.Header->GetStringField(TEXT("status")) == TEXT("exiting"))
 				{
 					State->bExiting = true;
+				}
+				if (InChannel->HandleOnPipeThread(Gen, Raw.Type, Frame.Header, Raw.Binary))
+				{
+					return;
 				}
 				Frame.Binary = MoveTemp(Raw.Binary);
 				AsyncTask(ENamedThreads::GameThread, [Weak, Gen, Frame = MoveTemp(Frame)]() mutable
@@ -207,11 +424,18 @@ void FPythonProcess::Launch()
 
 	UE_LOG(LogPythonCLI, Log, TEXT("Starting Python process '%s'"), *Name);
 	Handler->StartProcess(P);
+	//Async writes: the writer holds these until the process is up. Streams first, so Python has mapped
+	//them before any frame of theirs arrives.
+	for (const TSharedRef<FPythonStream, ESPMode::ThreadSafe>& Stream : Channel->GetStreams())
+	{
+		Handler->SendInput(PythonWire::EncodeFrame(PythonWire::Control, Stream->MakeOpenHeader()));
+	}
 	for (TArray<uint8>& Frame : Pending)
 	{
-		Handler->SendInput(Frame); //Async writes: the writer holds them until the process is up
+		Handler->SendInput(Frame);
 	}
 	Pending.Reset();
+	Channel->Attach(Handler, Gen);
 }
 
 void FPythonProcess::Send(TArray<uint8>&& Frame)
@@ -338,6 +562,7 @@ void FPythonProcess::HandleExit(int32 Code, const FString& Message)
 	bReady = false;
 	Pid = 0;
 	++Generation; //Anything still in flight from this launch is stale now
+	Channel->Detach(Message.IsEmpty() ? FString::Printf(TEXT("Python process '%s' exited"), *Name) : Message);
 	Release(0.5f);
 	if (!Message.IsEmpty())
 	{
@@ -375,6 +600,7 @@ void FPythonProcess::Stop(float GraceSeconds, bool bWait)
 		return;
 	}
 	bStopping = true;
+	Channel->Detach(FString::Printf(TEXT("Python process '%s' was stopped"), *Name));
 	TSharedRef<FJsonObject> Header = MakeShared<FJsonObject>();
 	Header->SetStringField(TEXT("cmd"), TEXT("exit"));
 	Header->SetNumberField(TEXT("grace"), FMath::RoundToInt(GraceSeconds * 1000.f));

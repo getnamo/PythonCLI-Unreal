@@ -3,6 +3,7 @@
     MAGIC[4] | type u8 | header_len u32 LE | header (UTF-8 JSON) | binary_len u32 LE | binary
 
 EVENT/REPLY binaries are a binary table: count u32 | count x (len u32 | bytes). RAWLOG binaries are text.
+STREAM binaries are the frame's raw data (inline streams), or empty (shared-memory streams).
 """
 import json
 import os
@@ -10,7 +11,7 @@ import struct
 import threading
 
 MAGIC = b"PUE\x01"
-LOG, RAWLOG, EVENT, REPLY, CONTROL, STATUS = 1, 2, 3, 4, 5, 6
+LOG, RAWLOG, EVENT, REPLY, CONTROL, STATUS, STREAM, ACK = 1, 2, 3, 4, 5, 6, 7, 8
 MAX_FRAME_BYTES = 512 * 1024 * 1024
 
 _HEAD = struct.Struct("<4sBI")

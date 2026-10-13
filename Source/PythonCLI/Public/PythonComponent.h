@@ -95,6 +95,9 @@ public:
 	/** Unique per component; scripts are keyed by it in the Python process. */
 	const FString& GetOwnerId() const { return OwnerId; }
 
+	/** The Python process this component's script runs in (shared or dedicated; created on first use). */
+	TSharedPtr<FPythonProcess, ESPMode::ThreadSafe> GetProcess();
+
 	/** Process id of the Python process this component uses (0 if none yet). */
 	UFUNCTION(BlueprintPure, Category = "Python")
 	int32 GetPythonProcessId() const;

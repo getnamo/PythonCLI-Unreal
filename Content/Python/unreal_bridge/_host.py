@@ -11,6 +11,7 @@ import time
 import traceback
 
 from . import _frames as F
+from . import _streams
 from . import _values
 
 _tls = threading.local()
@@ -42,6 +43,8 @@ class ScriptContext:
         self.path = path
         self.args = list(args or [])
         self.handlers = {}
+        self.stream_handlers = {}  # stream name -> [fn(frame)]
+        self.readers = {}  # stream name -> StreamReader (ue.stream iterators)
         self.module = None
         self.queue = queue.SimpleQueue()
         self.stopping = threading.Event()
@@ -101,6 +104,9 @@ class ScriptContext:
             except Exception:  # noqa: BLE001
                 self.host.log("error", f"{self.script} on_stop failed:\n{traceback.format_exc()}", self)
         self.handlers.clear()
+        self.stream_handlers.clear()
+        for reader in list(self.readers.values()):
+            reader.drain()
         sys.modules.pop(self.module_name, None)
         self.module = None
         self.stopped.set()
@@ -154,6 +160,50 @@ class ScriptContext:
             self.host.reply(self.owner, self.script, call_id, ok=False, error=f"{type(e).__name__}: {e}", traceback=tb)
             return
         self.host.reply(self.owner, self.script, call_id, ok=True, result=result)
+
+    def dispatch_stream(self, frame):
+        stream = frame.stream
+        try:
+            if stream.closed:
+                return
+            if frame._sid is None and stream.policy == "latest" and frame.seq < stream.latest_seq:
+                stream.skipped += 1  # a newer frame is already on its way: skip to it
+                return
+            reader = self.readers.get(stream.name)
+            if reader is not None:
+                reader.put(frame)
+                frame = None  # the iterator releases it
+                return
+            handlers = list(self.stream_handlers.get(stream.name, ()))
+            if not handlers:
+                if frame._sid is not None:
+                    frame.fail(f"{self.script} has no @ue.on_stream('{stream.name}') handler")
+                return
+            result = None
+            for i, h in enumerate(handlers):
+                r = h(frame)
+                if i == 0:
+                    result = r
+            if frame._sid is not None:
+                frame.reply(result)
+        except Exception as e:  # noqa: BLE001
+            tb = traceback.format_exc()
+            self.host.log("error", f"{self.script}: stream handler for '{stream.name}' failed:\n{tb}", self)
+            if frame is not None:
+                frame.fail(f"{type(e).__name__}: {e}", tb)
+        finally:
+            if frame is not None:
+                frame.release()
+
+    def add_reader(self, name):
+        reader = _streams.StreamReader(name)
+        self.readers[name] = reader
+        return reader
+
+    def remove_reader(self, name, reader):
+        if self.readers.get(name) is reader:
+            del self.readers[name]
+        reader.drain()
 
     # -- script helpers ------------------------------------------------------------------------------
     def run_in_background(self, fn, *args, **kwargs):
@@ -214,6 +264,8 @@ class Host:
         self.config = config
         self.lock = threading.Lock()
         self.scripts = {}  # (owner, script) -> ScriptContext
+        self.streams = {}  # (owner, stream) -> StreamState
+        self.closing_streams = []  # closed, but frame arrays still referenced their memory
         self.exiting = False
         sys.stdout = _FramedText(self, "info", "stdout")
         sys.stderr = _FramedText(self, "warning", "stderr")
@@ -258,6 +310,28 @@ class Host:
             self.writer.write(F.REPLY, {"owner": owner, "script": script, "id": call_id, "ok": False,
                                         "error": f"result is not JSON serializable: {e}"})
 
+    def stream_ack(self, frame):
+        st = frame.stream
+        self.writer.write(F.ACK, {"owner": st.owner, "stream": st.name, "slot": frame.slot, "seq": frame.seq})
+
+    def stream_reply(self, frame, ok, result=None, error=None, traceback=None):
+        st = frame.stream
+        buffers = []
+        header = {"owner": st.owner, "script": st.script, "stream": st.name, "sid": frame._sid, "ok": ok}
+        if ok:
+            try:
+                header["result"] = _values.encode(result, buffers)
+                self.writer.write(F.REPLY, header, F.build_table(buffers) if buffers else b"")
+                return
+            except Exception as e:  # noqa: BLE001 - not JSON serializable, unsupported dtype, ...
+                header.pop("result", None)
+                header.update(ok=False, error=f"step result could not be sent to Unreal: {type(e).__name__}: {e}")
+        else:
+            header["error"] = error
+            if traceback:
+                header["traceback"] = traceback
+        self.writer.write(F.REPLY, header)
+
     # -- bookkeeping ---------------------------------------------------------------------------------
     def _forget(self, ctx):
         with self.lock:
@@ -270,7 +344,9 @@ class Host:
 
     # -- incoming (reader thread) --------------------------------------------------------------------
     def handle(self, ftype, header, binary):
-        if ftype == F.CONTROL:
+        if ftype == F.STREAM:
+            self._stream(header, binary)
+        elif ftype == F.CONTROL:
             self._control(header)
         elif ftype == F.EVENT:
             self._event(header, binary)
@@ -295,6 +371,14 @@ class Host:
         elif cmd == "stopOwner":
             for ctx in self._owned(owner):
                 ctx.stop()
+            with self.lock:
+                names = [n for (o, n) in self.streams if o == owner]
+            for name in names:
+                self._close_stream(owner, name)
+        elif cmd == "openStream":
+            self._open_stream(owner, script, h)
+        elif cmd == "closeStream":
+            self._close_stream(owner, h.get("stream", ""))
         elif cmd == "ping":
             self.status("pong", None, id=h.get("id"))
         elif cmd == "exit":
@@ -316,6 +400,48 @@ class Host:
             old.stopped.wait(10)
             ctx.start()
         threading.Thread(target=start_after_old, name=f"py:{owner}:{script}:restart", daemon=True).start()
+
+    def _open_stream(self, owner, script, h):
+        name = h.get("stream", "")
+        self._close_stream(owner, name)
+        try:
+            st = _streams.StreamState(owner, script, name, h)
+        except Exception as e:  # noqa: BLE001
+            self.log("error", f"stream '{name}' could not be opened: {type(e).__name__}: {e}")
+            self.writer.write(F.STATUS, {"status": "streamError", "owner": owner, "stream": name, "error": f"{type(e).__name__}: {e}"})
+            return
+        with self.lock:
+            self.streams[(owner, name)] = st
+
+    def _close_stream(self, owner, name):
+        with self.lock:
+            st = self.streams.pop((owner, name), None)
+            if st is not None and not st.close():
+                self.closing_streams.append(st)
+            self.closing_streams = [c for c in self.closing_streams if not c.close()]
+
+    def _stream(self, h, binary):
+        owner, name = h.get("owner", ""), h.get("stream", "")
+        with self.lock:
+            st = self.streams.get((owner, name))
+            ctx = None
+            if st is not None:
+                ctx = self.scripts.get((owner, st.script))
+                if ctx is None:
+                    ctx = next((c for (o, _), c in self.scripts.items() if o == owner), None)
+        if st is None:
+            # Unknown stream (closed meanwhile): still hand the slot back, and fail a waiting step
+            self.writer.write(F.ACK, {"owner": owner, "stream": name, "slot": h.get("slot", 0), "seq": h.get("seq", 0)})
+            if h.get("sid") is not None:
+                self.writer.write(F.REPLY, {"owner": owner, "stream": name, "sid": h["sid"], "ok": False, "error": f"stream '{name}' is not open"})
+            return
+        st.received += 1
+        if h.get("seq", 0) > st.latest_seq:
+            st.latest_seq = h.get("seq", 0)
+        frame = _streams.StreamFrame(self, st, h, binary)
+        if ctx is None or not ctx.submit(lambda: ctx.dispatch_stream(frame)):
+            frame.fail(f"no script is running for stream '{name}'")
+            frame.release()
 
     def _event(self, h, binary):
         owner, script = h.get("owner", ""), h.get("script", "")

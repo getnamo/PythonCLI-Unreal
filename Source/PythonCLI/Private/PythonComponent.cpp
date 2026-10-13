@@ -23,6 +23,11 @@ int32 UPythonComponent::GetPythonProcessId() const
 	return Process.IsValid() ? Process->GetPid() : 0;
 }
 
+TSharedPtr<FPythonProcess, ESPMode::ThreadSafe> UPythonComponent::GetProcess()
+{
+	return EnsureProcess() ? Process : nullptr;
+}
+
 FString UPythonComponent::ResolveScriptPath() const
 {
 	const FString InProject = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / ScriptParams.ScriptRoot / ScriptParams.Script);

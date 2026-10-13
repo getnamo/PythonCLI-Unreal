@@ -77,14 +77,14 @@ def decode(value, buffers):
         if len(value) == 1 and isinstance(value.get("_bin"), int):
             return buffers[value["_bin"]]
         if isinstance(value.get("_tensor"), int) and "dtype" in value:
-            return _make_tensor(buffers[value["_tensor"]], value["dtype"], value.get("shape"))
+            return make_tensor(buffers[value["_tensor"]], value["dtype"], value.get("shape"))
         return {k: decode(v, buffers) for k, v in value.items()}
     if isinstance(value, list):
         return [decode(v, buffers) for v in value]
     return value
 
 
-def _make_tensor(buf, dtype, shape):
+def make_tensor(buf, dtype, shape):
     _numpy()
     if _np is not None:
         arr = _np.frombuffer(buf, dtype=_np.dtype(dtype).newbyteorder("<"))

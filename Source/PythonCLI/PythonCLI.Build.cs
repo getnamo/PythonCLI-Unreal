@@ -20,6 +20,9 @@ public class PythonCLI : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[]
 		{
 			"Projects",
+			"RenderCore",
+			"RHI",
+			"AudioCaptureCore",
 		});
 
 		// Stage the bridge scripts and this platform's interpreter + uv with packaged builds.

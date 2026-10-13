@@ -9,6 +9,10 @@
     def add(a, b):                      # Unreal: CallFunction("add", "[2,3]") -> 5
         return a + b
 
+    @ue.on_stream("camera")            # Unreal: a Python Render Target Stream named "camera"
+    def see(frame):
+        frame.array                     # (H, W, 4) uint8 view of the shared-memory slot; frame.rgb()
+
     def on_start(): ...                 # optional: after the script loads
     def on_stop(): ...                  # optional: before it unloads (stop, reload, exit)
 
@@ -19,11 +23,14 @@ numpy) pass through as binary, without JSON encoding.
 import os
 
 from . import _host as _h
+from . import _streams
 from ._host import current_context as _ctx
+from ._streams import StreamFrame
 from ._values import Tensor, numpy_version
 
-__all__ = ["on", "emit", "log", "warning", "error", "args", "should_stop", "stopping", "run_in_background",
-           "script_path", "script_dir", "project_dir", "content_dir", "owner", "Tensor", "numpy_version"]
+__all__ = ["on", "on_stream", "stream", "emit", "log", "warning", "error", "args", "should_stop", "stopping",
+           "run_in_background", "script_path", "script_dir", "project_dir", "content_dir", "owner", "Tensor",
+           "StreamFrame", "numpy_version"]
 
 
 def _require():
@@ -43,6 +50,27 @@ def on(name=None):
     if callable(name):
         return register(name)
     return lambda fn: register(fn, name)
+
+
+def on_stream(name=None):
+    """Register a handler for an Unreal stream (render target, audio, observations): fn(frame) is called
+    on the script's worker thread with a StreamFrame. frame.array is a view of Unreal's slot, valid until
+    the handler returns. For Lockstep streams the return value is the step's result in Unreal.
+    Use as @ue.on_stream("name") or bare @ue.on_stream (the function's own name)."""
+    def register(fn, stream_name=None):
+        ctx = _require()
+        ctx.stream_handlers.setdefault(stream_name or fn.__name__, []).append(fn)
+        return fn
+    if callable(name):
+        return register(name)
+    return lambda fn: register(fn, name)
+
+
+def stream(name, timeout=None):
+    """Iterate a stream's frames instead of handling them with @ue.on_stream (typically from
+    ue.run_in_background). Each frame stays valid until the next one is requested; the loop ends when the
+    script stops, or after `timeout` seconds without a frame. Lockstep frames: frame.reply(result)."""
+    return _streams.iterate(_require(), name, timeout)
 
 
 def emit(name, *args):
