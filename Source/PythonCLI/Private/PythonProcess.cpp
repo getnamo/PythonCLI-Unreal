@@ -339,7 +339,15 @@ void FPythonProcess::Launch()
 	Config->SetStringField(TEXT("content_dir"), FPaths::ConvertRelativePathToFull(FPaths::ProjectContentDir()));
 	Config->SetStringField(TEXT("process"), Name);
 
-	const FString ConfigPath = FPythonEnvironment::WorkDir() / FString::Printf(TEXT("runtime_%s.json"), *Name);
+	FString FileName = Name; //Service names can hold path characters ("svc-torch:examples/model.py")
+	for (TCHAR& C : FileName)
+	{
+		if (!FChar::IsAlnum(C) && C != TEXT('-') && C != TEXT('_') && C != TEXT('.'))
+		{
+			C = TEXT('_');
+		}
+	}
+	const FString ConfigPath = FPythonEnvironment::WorkDir() / FString::Printf(TEXT("runtime_%s.json"), *FileName);
 	FFileHelper::SaveStringToFile(PythonWire::ToJsonString(MakeShared<FJsonValueObject>(Config)), *ConfigPath, FFileHelper::EEncodingOptions::ForceUTF8WithoutBOM);
 
 	const FString Interpreter = FPythonEnvironment::InterpreterPath();

@@ -140,9 +140,17 @@ class Job:
         return self._stop.wait(seconds) or self._ctx.stopping.is_set()
 
     # -- reporting -----------------------------------------------------------------------------------
-    def progress(self, fraction, message=None, force=False):
-        """0..1 (of the whole job); rate-limited to 20 events a second unless force."""
-        self._progress = max(0.0, min(1.0, float(fraction)))
+    @property
+    def fraction(self):
+        """The job's progress so far, 0..1."""
+        return self._progress
+
+    def progress(self, fraction=None, message=None, force=False):
+        """0..1 (of the whole job; None keeps it, e.g. to send just a message); rate-limited to 20 events a second
+        unless force (or a message is given)."""
+        if fraction is not None:
+            self._progress = max(0.0, min(1.0, float(fraction)))
+        force = force or message is not None
         now = time.monotonic()
         if force or now - self._last_progress >= PROGRESS_INTERVAL or self._progress >= 1.0:
             self._last_progress = now
