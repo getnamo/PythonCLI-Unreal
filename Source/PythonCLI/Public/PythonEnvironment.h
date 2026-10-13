@@ -41,11 +41,11 @@ public:
 	static void RegisterScriptDirectory(const FString& Directory);
 	static TArray<FString> GetScriptDirectories();
 
-	/** Requirements for packaged builds instead of the editor's (e.g. CPU torch while the editor has CUDA).
-	 Once a plugin registers one (or Project Settings > Python CLI > Override Packaged Requirements is on),
-	 Bundle and Install On First Run install these plus the setting's Packaged Requirements, and not the
-	 editor's requirements. */
-	static void RegisterPackagedRequirementsFile(const FString& FilePath);
+	/** A requirements file for packaged builds (Bundle, Install On First Run), e.g. CPU torch while the editor has
+	 CUDA. It replaces the registered editor file ReplacesFile there (if given); the other requirements stay as
+	 in the editor. With Project Settings > Python CLI > Override Packaged Requirements on, packaged builds get
+	 only the setting's Packaged Requirements plus these files. */
+	static void RegisterPackagedRequirementsFile(const FString& FilePath, const FString& ReplacesFile = FString());
 	static void UnregisterPackagedRequirementsFile(const FString& FilePath);
 	/** The uv --torch-backend for packaged builds when the Packaged Torch Backend setting is empty. */
 	static void SetDefaultPackagedTorchBackend(const FString& Backend);

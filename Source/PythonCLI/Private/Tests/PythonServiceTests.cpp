@@ -275,29 +275,35 @@ bool FPythonPackagedOverrideTest::RunTest(const FString&)
 		return true;
 	}
 	const FString File = FPaths::ConvertRelativePathToFull(FPaths::ProjectIntermediateDir() / TEXT("PythonCLI/test-packaged-requirements.txt"));
+	const FString EditorFile = FPaths::ConvertRelativePathToFull(FPaths::ProjectIntermediateDir() / TEXT("PythonCLI/test-editor-requirements.txt"));
 	FFileHelper::SaveStringToFile(TEXT("six\n"), *File);
-	FPythonEnvironment::RegisterPackagedRequirementsFile(File);
+	FFileHelper::SaveStringToFile(TEXT("# an editor file the packaged one replaces (nothing to install)\n"), *EditorFile);
+	FPythonEnvironment::RegisterRequirementsFile(EditorFile);
+	FPythonEnvironment::RegisterPackagedRequirementsFile(File, EditorFile);
 	FPythonEnvironment::SetDefaultPackagedTorchBackend(TEXT("cpu"));
 	Subsystem->SetupEnvironment();
 	WaitUntil(this, TEXT("environment"), [Subsystem] { return Subsystem->GetEnvironmentState() != EPythonEnvironmentState::SettingUp; }, 600.0);
-	Step([this, Subsystem, File]
+	Step([this, Subsystem, File, EditorFile]
 	{
 		FString Requirements, Args;
 		FFileHelper::LoadFileToString(Requirements, *FPythonEnvironment::PackagedRequirementsPath());
 		FFileHelper::LoadFileToString(Args, *FPythonEnvironment::PackagedArgsPath());
 		TestTrue(TEXT("packaged requirements written for the build"), Requirements.Contains(File));
+		TestFalse(TEXT("the packaged file replaces its editor file"), Requirements.Contains(EditorFile));
 		TestEqual(TEXT("packaged uv arguments"), Args, TEXT("--torch-backend cpu"));
+		FPythonEnvironment::UnregisterRequirementsFile(EditorFile);
 		FPythonEnvironment::UnregisterPackagedRequirementsFile(File);
 		FPythonEnvironment::SetDefaultPackagedTorchBackend(FString());
 		Subsystem->SetupEnvironment();
 	});
 	WaitUntil(this, TEXT("environment"), [Subsystem] { return Subsystem->GetEnvironmentState() != EPythonEnvironmentState::SettingUp; }, 600.0);
-	Step([this, File]
+	Step([this, File, EditorFile]
 	{
 		FString Requirements;
 		FFileHelper::LoadFileToString(Requirements, *FPythonEnvironment::PackagedRequirementsPath());
 		TestFalse(TEXT("unregistered: gone from the packaged requirements"), Requirements.Contains(File));
 		IFileManager::Get().Delete(*File);
+		IFileManager::Get().Delete(*EditorFile);
 	});
 	return true;
 }

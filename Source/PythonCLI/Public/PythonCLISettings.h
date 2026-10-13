@@ -78,9 +78,9 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Packaging")
 	EPythonPackagedEnvMode PackagedEnvMode = EPythonPackagedEnvMode::Bundle;
 
-	/** Packaged builds (Bundle, Install On First Run) get Packaged Requirements instead of the editor's
-	 environment: e.g. CPU torch for the game while the editor uses CUDA. Plugins can register packaged
-	 requirements too (then they apply even when this is off). */
+	/** Packaged builds (Bundle, Install On First Run) get only Packaged Requirements (plus what plugins register
+	 for packaged builds) instead of the editor's environment. Off: the editor's requirements, with the
+	 replacements plugins register (e.g. PyTorch-Unreal's CPU torch for packaged builds). */
 	UPROPERTY(config, EditAnywhere, Category = "Packaging")
 	bool bOverridePackagedRequirements = false;
 

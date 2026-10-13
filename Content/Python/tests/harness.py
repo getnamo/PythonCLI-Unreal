@@ -34,9 +34,9 @@ def check(name, ok, detail=""):
 
 
 class Bridge:
-    def __init__(self, site_dirs=(), preload=()):
-        cfg = {"site_dirs": list(site_dirs), "env": {"PYTHONCLI_TEST": "1"}, "preload": list(preload),
-               "project_dir": PYDIR, "content_dir": PYDIR}
+    def __init__(self, site_dirs=(), preload=(), script_dirs=(), project_dir=PYDIR, env=None):
+        cfg = {"site_dirs": list(site_dirs), "env": {"PYTHONCLI_TEST": "1", **(env or {})}, "preload": list(preload),
+               "project_dir": project_dir, "content_dir": project_dir, "script_dirs": list(script_dirs)}
         fd, self.cfg_path = tempfile.mkstemp(suffix=".json")
         with os.fdopen(fd, "w") as f:
             json.dump(cfg, f)

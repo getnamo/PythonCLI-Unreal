@@ -24,7 +24,7 @@ namespace PythonEnvironmentPrivate
 	static TArray<FString> RegisteredFiles;
 	static TArray<FString> RegisteredScriptDirs;
 	static TMap<FString, FString> RegisteredEnv;
-	static TArray<FString> RegisteredPackagedFiles;
+	static TMap<FString, FString> RegisteredPackagedFiles; //Packaged file -> the editor file it replaces (or "")
 	static FString DefaultPackagedTorchBackend;
 
 	static FString Quote(const FString& S)
@@ -91,10 +91,11 @@ TArray<FString> FPythonEnvironment::GetScriptDirectories()
 	return PythonEnvironmentPrivate::RegisteredScriptDirs;
 }
 
-void FPythonEnvironment::RegisterPackagedRequirementsFile(const FString& FilePath)
+void FPythonEnvironment::RegisterPackagedRequirementsFile(const FString& FilePath, const FString& ReplacesFile)
 {
 	FScopeLock L(&PythonEnvironmentPrivate::RegisteredLock);
-	PythonEnvironmentPrivate::RegisteredPackagedFiles.AddUnique(FPaths::ConvertRelativePathToFull(FilePath));
+	PythonEnvironmentPrivate::RegisteredPackagedFiles.Add(FPaths::ConvertRelativePathToFull(FilePath),
+		ReplacesFile.IsEmpty() ? FString() : FPaths::ConvertRelativePathToFull(ReplacesFile));
 }
 
 void FPythonEnvironment::UnregisterPackagedRequirementsFile(const FString& FilePath)
@@ -146,30 +147,62 @@ bool FPythonEnvironment::PackagedOverride(FString& OutRequirements, FString& Out
 {
 	using namespace PythonEnvironmentPrivate;
 	const UPythonCLISettings* Settings = GetDefault<UPythonCLISettings>();
-	TArray<FString> Files;
+	TMap<FString, FString> Packaged;
+	TArray<FString> EditorFiles;
 	FString Backend;
 	{
 		FScopeLock L(&RegisteredLock);
-		Files = RegisteredPackagedFiles;
+		Packaged = RegisteredPackagedFiles;
+		EditorFiles = RegisteredFiles;
 		Backend = DefaultPackagedTorchBackend;
 	}
 	OutRequirements.Reset();
 	OutArgs.Reset();
-	if (!Settings->bOverridePackagedRequirements && Files.Num() == 0)
+	if (!Settings->bOverridePackagedRequirements && Packaged.Num() == 0 && Backend.IsEmpty() && Settings->PackagedTorchBackend.IsEmpty())
 	{
 		return false;
 	}
-	for (const FString& Line : Settings->PackagedRequirements)
+	auto AddLines = [&OutRequirements](const TArray<FString>& Lines)
 	{
-		const FString Trimmed = Line.TrimStartAndEnd();
-		if (!Trimmed.IsEmpty())
+		for (const FString& Line : Lines)
 		{
-			OutRequirements += Trimmed + TEXT("\n");
+			const FString Trimmed = Line.TrimStartAndEnd();
+			if (!Trimmed.IsEmpty())
+			{
+				OutRequirements += Trimmed + TEXT("\n");
+			}
+		}
+	};
+	if (Settings->bOverridePackagedRequirements)
+	{
+		AddLines(Settings->PackagedRequirements);
+	}
+	else
+	{
+		//The editor's requirements, with the plugins' packaged replacements
+		AddLines(Settings->Requirements);
+		TSet<FString> Replaced;
+		for (const TPair<FString, FString>& Pair : Packaged)
+		{
+			Replaced.Add(Pair.Value);
+		}
+		EditorFiles.Add(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Content/Scripts/requirements.txt")));
+		for (const FString& File : EditorFiles)
+		{
+			FString Contents;
+			if (!Replaced.Contains(File) && FFileHelper::LoadFileToString(Contents, *File) && !Contents.TrimStartAndEnd().IsEmpty())
+			{
+				OutRequirements += TEXT("-r ") + Quote(File) + TEXT("\n");
+			}
+		}
+		if (Backend.IsEmpty())
+		{
+			Backend = Settings->TorchBackend;
 		}
 	}
-	for (const FString& File : Files)
+	for (const TPair<FString, FString>& Pair : Packaged)
 	{
-		OutRequirements += TEXT("-r ") + Quote(File) + TEXT("\n");
+		OutRequirements += TEXT("-r ") + Quote(Pair.Key) + TEXT("\n");
 	}
 	if (!Settings->PackagedTorchBackend.IsEmpty())
 	{
