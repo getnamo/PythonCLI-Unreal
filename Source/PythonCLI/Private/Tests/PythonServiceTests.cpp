@@ -22,6 +22,9 @@
 #include "Misc/Paths.h"
 #include "RHI.h"
 
+// The tests are in a namespace of their own: a file-scope using-directive would leak into the other files of a unity build.
+namespace PythonServiceTestsSuite
+{
 using namespace PythonCLITests;
 
 namespace PythonServiceTests
@@ -307,5 +310,7 @@ bool FPythonPackagedOverrideTest::RunTest(const FString&)
 	});
 	return true;
 }
+
+} // namespace PythonServiceTestsSuite
 
 #endif

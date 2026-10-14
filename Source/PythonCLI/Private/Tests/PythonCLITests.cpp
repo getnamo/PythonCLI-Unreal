@@ -22,6 +22,9 @@
 #include "GameFramework/Actor.h"
 #include "Misc/Paths.h"
 
+// The tests are in a namespace of their own: a file-scope using-directive would leak into the other files of a unity build.
+namespace PythonCLITestsSuite
+{
 using namespace PythonCLITests;
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FPythonWirePackTest, "PythonCLI.Wire.PackArgs", PythonCLITests::Flags)
@@ -359,5 +362,7 @@ bool FPythonProcessCrashTest::RunTest(const FString&)
 	});
 	return true;
 }
+
+} // namespace PythonCLITestsSuite
 
 #endif // WITH_DEV_AUTOMATION_TESTS

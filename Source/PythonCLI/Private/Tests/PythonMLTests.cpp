@@ -12,6 +12,9 @@
 #include "PythonTestHelpers.h"
 #include "PythonTestReceiver.h"
 
+// The tests are in a namespace of their own: a file-scope using-directive would leak into the other files of a unity build.
+namespace PythonMLTestsSuite
+{
 using namespace PythonCLITests;
 
 namespace PythonMLTests
@@ -221,5 +224,7 @@ bool FPythonMLLegacyTest::RunTest(const FString&)
 	});
 	return true;
 }
+
+} // namespace PythonMLTestsSuite
 
 #endif
