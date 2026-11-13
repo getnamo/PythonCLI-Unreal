@@ -78,7 +78,7 @@ bool UPythonStreamComponent::OpenStream()
 		TSharedPtr<FJsonObject> Extra;
 		if (!TargetInfoJson.IsEmpty() && FJsonSerializer::Deserialize(TJsonReaderFactory<>::Create(TargetInfoJson), Extra) && Extra.IsValid())
 		{
-			for (const TPair<FString, TSharedPtr<FJsonValue>>& Field : Extra->Values)
+			for (const auto& Field : Extra->Values)
 			{
 				Config.Info->SetField(Field.Key, Field.Value);
 			}
